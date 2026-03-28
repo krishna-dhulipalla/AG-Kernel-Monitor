@@ -1,44 +1,72 @@
 /**
- * Log tailer — tails Antigravity.log for active-session runtime signals.
+ * Log tailer - polls the latest Antigravity.log for active-session runtime signals.
  */
 
-import { existsSync, readFileSync, statSync, watchFile } from "fs";
+import { existsSync, readFileSync, statSync } from "fs";
 import chalk from "chalk";
 import type { MonitorDB } from "../db/schema";
 import type { AgKernelConfig } from "../config";
 import { estimateConversationMetrics, formatRatio, formatTokens } from "../metrics/estimator";
 import { takeSnapshotIfChanged } from "../metrics/snapshotter";
-import { findLatestLogFile, parseLogLine } from "../runtime/log-signals";
+import { findLatestLogFile, parseLogLine, scanLatestLogFile } from "../runtime/log-signals";
+import { ensureConversationLoaded } from "./reconcile-helper";
 
 interface LogTailState {
-  filePath: string;
+  filePath: string | null;
   offset: number;
   currentConversationId: string | null;
 }
 
 export function startLogTailer(db: MonitorDB, config: AgKernelConfig): void {
-  const logFilePath = findLatestLogFile();
+  const initialSnapshot = scanLatestLogFile();
 
-  if (!logFilePath || !existsSync(logFilePath)) {
-    console.log(chalk.dim("   Log tailer: no Antigravity.log found"));
+  if (initialSnapshot.logFilePath && existsSync(initialSnapshot.logFilePath)) {
+    console.log(chalk.dim(`   Tailing: ${initialSnapshot.logFilePath}`));
+  } else {
+    console.log(chalk.dim("   Log tailer: waiting for Antigravity.log..."));
+  }
+
+  const state: LogTailState = {
+    filePath: initialSnapshot.logFilePath,
+    offset: initialSnapshot.logFilePath && existsSync(initialSnapshot.logFilePath)
+      ? statSync(initialSnapshot.logFilePath).size
+      : 0,
+    currentConversationId: initialSnapshot.activeConversationId,
+  };
+
+  const poll = async () => {
+    await refreshLatestLogFile(state);
+    await processNewLines(db, config, state);
+  };
+
+  const timer = setInterval(() => {
+    void poll();
+  }, 1000);
+
+  void poll();
+  process.once("exit", () => clearInterval(timer));
+}
+
+async function refreshLatestLogFile(state: LogTailState): Promise<void> {
+  const latestPath = findLatestLogFile();
+  if (!latestPath || !existsSync(latestPath) || latestPath === state.filePath) {
     return;
   }
 
-  console.log(chalk.dim(`   Tailing: ${logFilePath}`));
+  const snapshot = scanLatestLogFile();
+  state.filePath = latestPath;
+  state.offset = 0;
+  state.currentConversationId = snapshot.activeConversationId ?? state.currentConversationId;
 
-  const state: LogTailState = {
-    filePath: logFilePath,
-    offset: statSync(logFilePath).size,
-    currentConversationId: null,
-  };
-
-  watchFile(logFilePath, { interval: 1000 }, () => {
-    processNewLines(db, config, state);
-  });
+  console.log(chalk.dim(`   Tailing: ${latestPath}`));
 }
 
-function processNewLines(db: MonitorDB, config: AgKernelConfig, state: LogTailState): void {
+async function processNewLines(db: MonitorDB, config: AgKernelConfig, state: LogTailState): Promise<void> {
   try {
+    if (!state.filePath || !existsSync(state.filePath)) {
+      return;
+    }
+
     const stats = statSync(state.filePath);
     if (stats.size < state.offset) {
       state.offset = 0;
@@ -65,7 +93,7 @@ function processNewLines(db: MonitorDB, config: AgKernelConfig, state: LogTailSt
         continue;
       }
 
-      const conversation = db.getConversation(state.currentConversationId);
+      const conversation = await ensureConversationLoaded(db, config, state.currentConversationId);
       if (!conversation) {
         continue;
       }
@@ -110,8 +138,8 @@ function processNewLines(db: MonitorDB, config: AgKernelConfig, state: LogTailSt
         chalk.magenta(" [LIVE]") +
         ` ${updatedConversation.id.slice(0, 12)}...${title}` +
         ` now at ${chalk.bold(String(newCount))} direct messages${deltaLabel}` +
-        ` → ${formatTokens(updatedConversation.estimated_tokens)} estimated tokens` +
-        ` (${formatRatio(ratio)} of limit)`
+        ` -> ${formatTokens(updatedConversation.estimated_tokens)} estimated tokens` +
+        ` (${formatRatio(ratio)} of limit)`,
       );
     }
   } catch {

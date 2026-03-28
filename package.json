@@ -71,7 +71,7 @@
         "agKernelMonitor.bunPath": {
           "type": "string",
           "default": "bun",
-          "description": "Path to the Bun executable used to run the bundled AG Kernel Monitor CLI."
+          "description": "Path to the Bun executable used only as a fallback when a bundled platform binary is not available."
         },
         "agKernelMonitor.cliConfigPath": {
           "type": "string",
@@ -100,6 +100,8 @@
     "start": "bun run src/cli/index.ts",
     "build": "bun build src/cli/index.ts --outdir dist --target bun",
     "build:vsx-cli": "bun build src/cli/index.ts --outfile vscode/runtime/agk-cli.js --target bun",
+    "build:runtime-binaries": "bun run scripts/build-platform-binaries.ts",
+    "package:vsix": "npx @vscode/vsce package",
     "test": "bun test"
   },
   "dependencies": {
@@ -108,7 +110,8 @@
     "commander": "^13.1.0"
   },
   "devDependencies": {
-    "@types/bun": "^1.2.0"
+    "@types/bun": "^1.2.0",
+    "@vscode/vsce": "^3.6.1"
   },
   "keywords": [
     "antigravity",

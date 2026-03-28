@@ -8,6 +8,8 @@ dist/
 *.db
 .tmp*
 docs/
+vscode/runtime/bin/
+*.vsix
 
 # Bun
 bun.lock

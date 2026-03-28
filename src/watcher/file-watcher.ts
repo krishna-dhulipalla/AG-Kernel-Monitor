@@ -1,5 +1,5 @@
 /**
- * File watcher — monitors conversations/ for .pb size changes.
+ * File watcher - monitors conversations/ for .pb size changes.
  */
 
 import { existsSync, statSync, watch } from "fs";
@@ -10,6 +10,7 @@ import type { AgKernelConfig } from "../config";
 import { estimateConversationMetrics, formatBytes, formatRatio, formatTokens } from "../metrics/estimator";
 import { takeSnapshotIfChanged } from "../metrics/snapshotter";
 import { getConversationsDir } from "../paths";
+import { ensureConversationLoaded } from "./reconcile-helper";
 
 const DEBOUNCE_MS = 500;
 
@@ -17,7 +18,7 @@ export function startFileWatcher(db: MonitorDB, config: AgKernelConfig): void {
   const conversationsDir = getConversationsDir();
 
   if (!existsSync(conversationsDir)) {
-    console.warn(chalk.yellow(`⚠️  Cannot watch — conversations directory not found: ${conversationsDir}`));
+    console.warn(chalk.yellow(`Cannot watch - conversations directory not found: ${conversationsDir}`));
     return;
   }
 
@@ -34,22 +35,27 @@ export function startFileWatcher(db: MonitorDB, config: AgKernelConfig): void {
         filename,
         setTimeout(() => {
           debounceTimers.delete(filename);
-          handlePbChange(db, config, conversationsDir, filename);
+          void handlePbChange(db, config, conversationsDir, filename);
         }, DEBOUNCE_MS),
       );
     });
 
     watcher.on("error", (err) => {
-      console.error(chalk.red("❌ File watcher error:"), err.message);
+      console.error(chalk.red("File watcher error:"), err.message);
     });
 
     console.log(chalk.dim(`   Watching: ${conversationsDir}`));
   } catch (err) {
-    console.error(chalk.red("❌ Failed to start file watcher:"), err);
+    console.error(chalk.red("Failed to start file watcher:"), err);
   }
 }
 
-function handlePbChange(db: MonitorDB, config: AgKernelConfig, conversationsDir: string, filename: string): void {
+async function handlePbChange(
+  db: MonitorDB,
+  config: AgKernelConfig,
+  conversationsDir: string,
+  filename: string,
+): Promise<void> {
   const filePath = join(conversationsDir, filename);
   const conversationId = basename(filename, ".pb");
 
@@ -60,7 +66,7 @@ function handlePbChange(db: MonitorDB, config: AgKernelConfig, conversationsDir:
       return;
     }
 
-    const conversation = db.getConversation(conversationId);
+    const conversation = await ensureConversationLoaded(db, config, conversationId);
     if (!conversation) {
       return;
     }
@@ -104,8 +110,8 @@ function handlePbChange(db: MonitorDB, config: AgKernelConfig, conversationsDir:
       ` ${updatedConversation.id.slice(0, 12)}...${title}` +
       ` ${deltaBytes >= 0 ? "+" : "-"}${formatBytes(Math.abs(deltaBytes))}` +
       ` (${snapshot.deltaTokens >= 0 ? "+" : "-"}${formatTokens(Math.abs(snapshot.deltaTokens))} est. tokens)` +
-      ` → ${formatTokens(updatedConversation.estimated_tokens)} estimated total` +
-      ` (${formatRatio(ratio)} of limit)`
+      ` -> ${formatTokens(updatedConversation.estimated_tokens)} estimated total` +
+      ` (${formatRatio(ratio)} of limit)`,
     );
   } catch {
     // Ignore transient file access failures during rapid writes.

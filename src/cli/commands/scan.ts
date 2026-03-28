@@ -71,12 +71,12 @@ export function registerScanCommand(program: Command, db: MonitorDB, config: AgK
 
       if (watchMode) {
         console.log(chalk.yellow("Watch mode - press Ctrl+C to exit"));
+        console.log(chalk.dim("   Live watch focuses on the current conversation only."));
+        console.log(chalk.dim("   Run `agk scan` when you want the full workspace history and cleanup summary."));
         console.log();
         displayCurrentConversation(db, config, false);
         console.log();
-        displayWorkspaceSummary(db, config, false);
-        console.log();
-        console.log(chalk.dim("   Monitoring live session growth..."));
+        console.log(chalk.dim("   Waiting for .pb changes and Antigravity runtime signals..."));
 
         const { startFileWatcher } = await import("../../watcher/file-watcher");
         const { startLogTailer } = await import("../../watcher/log-tailer");

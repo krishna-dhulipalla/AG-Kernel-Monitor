@@ -4,6 +4,8 @@
 .tmp*
 docs/**
 dist/**
+node_modules/**
+scripts/**
 src/**/*.test.ts
 src/**
 tsconfig.json

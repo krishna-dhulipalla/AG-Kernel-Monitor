@@ -67,8 +67,8 @@ bun run dev report
 
 Current state:
 
-- The extension still requires Bun on the user machine.
-- The extension runs the bundled AG Kernel Monitor CLI through Bun.
+- The published extension should ship a platform-specific runtime so the user does not need Bun.
+- Local development still uses Bun to build the runtime artifacts.
 - The CLI obviously requires Bun as well.
 
 Can Bun be removed technically?
@@ -80,6 +80,17 @@ Yes, but not in the current build. The clean way to remove that requirement is t
 - a precompiled Linux binary
 
 That would let the extension run without asking the user to install Bun manually. The current codebase is already structured so that move is practical later.
+
+Current packaging direction:
+
+- `vscode/runtime/bin/win32-x64/agk-monitor.exe`
+- `vscode/runtime/bin/win32-arm64/agk-monitor.exe`
+- `vscode/runtime/bin/darwin-x64/agk-monitor`
+- `vscode/runtime/bin/darwin-arm64/agk-monitor`
+- `vscode/runtime/bin/linux-x64/agk-monitor`
+- `vscode/runtime/bin/linux-arm64/agk-monitor`
+
+These binaries are generated during packaging and release. They should not be committed to Git.
 
 ## Compatibility
 

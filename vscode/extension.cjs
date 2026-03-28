@@ -64,10 +64,6 @@ class AgKernelCliService {
 
   async runJson(args) {
     const cliBundlePath = path.join(this.extensionPath, "vscode", "runtime", "agk-cli.js");
-    if (!fs.existsSync(cliBundlePath)) {
-      throw new Error("Bundled CLI not found. Run `bun run build:vsx-cli` before packaging the extension.");
-    }
-
     const settings = readSettings();
     const configArgs = [];
     const resolvedConfigPath = resolveConfiguredPath(settings.cliConfigPath);
@@ -75,15 +71,25 @@ class AgKernelCliService {
       configArgs.push("--config", resolvedConfigPath);
     }
 
+    const binaryRuntime = resolveBundledBinary(this.extensionPath);
+    if (binaryRuntime) {
+      return runProcess(binaryRuntime.command, [...configArgs, ...args], this.output, this.extensionPath);
+    }
+
+    if (!fs.existsSync(cliBundlePath)) {
+      throw new Error(
+        "No bundled platform binary was found, and the Bun JS bundle is also missing. Run `bun run build:vsx-cli` for dev, or ship platform binaries in the published extension.",
+      );
+    }
+
     const bunCandidates = buildBunCandidates(settings.bunPath);
     let lastError = null;
 
     for (const bunPath of bunCandidates) {
       try {
-        return await runCliProcess(
+        return await runProcess(
           bunPath,
-          cliBundlePath,
-          [...configArgs, ...args],
+          [cliBundlePath, ...configArgs, ...args],
           this.output,
           this.extensionPath,
         );
@@ -262,11 +268,32 @@ function buildBunCandidates(configuredPath) {
   return candidates;
 }
 
-function runCliProcess(bunPath, cliBundlePath, args, output, cwd) {
-  return new Promise((resolve, reject) => {
-    output.appendLine(`[cli] ${bunPath} ${[cliBundlePath, ...args].join(" ")}`);
+function resolveBundledBinary(extensionPath) {
+  const target = getVsCodeTarget();
+  if (!target) {
+    return null;
+  }
 
-    const child = spawn(bunPath, [cliBundlePath, ...args], {
+  const fileName = target.startsWith("win32-") ? "agk-monitor.exe" : "agk-monitor";
+  const candidate = path.join(extensionPath, "vscode", "runtime", "bin", target, fileName);
+  return fs.existsSync(candidate) ? { command: candidate, target } : null;
+}
+
+function getVsCodeTarget() {
+  if (process.platform === "win32" && process.arch === "x64") return "win32-x64";
+  if (process.platform === "win32" && process.arch === "arm64") return "win32-arm64";
+  if (process.platform === "darwin" && process.arch === "x64") return "darwin-x64";
+  if (process.platform === "darwin" && process.arch === "arm64") return "darwin-arm64";
+  if (process.platform === "linux" && process.arch === "x64") return "linux-x64";
+  if (process.platform === "linux" && process.arch === "arm64") return "linux-arm64";
+  return null;
+}
+
+function runProcess(command, args, output, cwd) {
+  return new Promise((resolve, reject) => {
+    output.appendLine(`[cli] ${command} ${args.join(" ")}`);
+
+    const child = spawn(command, args, {
       cwd,
       env: process.env,
       windowsHide: true,
@@ -313,12 +340,67 @@ function parseJsonPayload(stdout) {
   try {
     return JSON.parse(trimmed);
   } catch {
-    const firstObject = trimmed.search(/[\[{]/);
-    if (firstObject < 0) {
-      throw new Error("No JSON payload found in CLI output.");
+    const payload = extractFirstJsonPayload(trimmed);
+    if (!payload) {
+      throw new Error("No complete JSON payload found in CLI output.");
     }
-    return JSON.parse(trimmed.slice(firstObject));
+    return JSON.parse(payload);
   }
+}
+
+function extractFirstJsonPayload(text) {
+  for (let start = 0; start < text.length; start += 1) {
+    const opening = text[start];
+    if (opening !== "{" && opening !== "[") {
+      continue;
+    }
+
+    const stack = [opening];
+    let inString = false;
+    let escaping = false;
+
+    for (let index = start + 1; index < text.length; index += 1) {
+      const char = text[index];
+
+      if (escaping) {
+        escaping = false;
+        continue;
+      }
+
+      if (char === "\\") {
+        escaping = true;
+        continue;
+      }
+
+      if (char === "\"") {
+        inString = !inString;
+        continue;
+      }
+
+      if (inString) {
+        continue;
+      }
+
+      if (char === "{" || char === "[") {
+        stack.push(char);
+        continue;
+      }
+
+      if (char === "}" || char === "]") {
+        const expected = char === "}" ? "{" : "[";
+        if (stack[stack.length - 1] !== expected) {
+          break;
+        }
+
+        stack.pop();
+        if (stack.length === 0) {
+          return text.slice(start, index + 1);
+        }
+      }
+    }
+  }
+
+  return null;
 }
 
 function pickWorkspaceForSidebar(scanSummary, preferredFolder) {
@@ -517,8 +599,9 @@ function renderErrorContent(error, state) {
   return `
     ${renderSection("Extension Error", `
       <div class="empty">${escapeHtml(String(error?.message || error || "Unknown error"))}</div>
-      <div class="detail">If Bun is not installed or not on PATH, set <code>agKernelMonitor.bunPath</code> in VS Code settings.</div>
-      <div class="detail">If the bundled CLI is missing, run <code>bun run build:vsx-cli</code> from this repo before packaging or testing the extension.</div>
+      <div class="detail">Published platform packages should use a bundled native runtime first. Bun is only needed as a fallback when no native runtime is available.</div>
+      <div class="detail">For local development, run <code>bun run build:vsx-cli</code> or <code>bun run scripts/build-platform-binaries.ts &lt;target&gt;</code> before testing the extension.</div>
+      <div class="detail">If you still want Bun fallback, set <code>agKernelMonitor.bunPath</code> in VS Code settings.</div>
       ${state ? `<div class="detail">Last successful refresh: ${escapeHtml(state.loadedAt || "unknown")}</div>` : ""}
     `)}
   `;
@@ -546,10 +629,10 @@ function renderListRow({ title, subtitle, meta }) {
   return `
     <div class="row">
       <div class="row-main">
-        <div class="row-title">${escapeHtml(title)}</div>
-        <div class="row-subtitle">${escapeHtml(subtitle)}</div>
+        <div class="row-title">${escapeHtml(cleanUiText(title))}</div>
+        <div class="row-subtitle">${escapeHtml(cleanUiText(subtitle))}</div>
       </div>
-      <div class="row-meta">${escapeHtml(meta)}</div>
+      <div class="row-meta">${escapeHtml(cleanUiText(meta))}</div>
     </div>
   `;
 }
@@ -771,6 +854,13 @@ function escapeHtml(value) {
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#39;");
+}
+
+function cleanUiText(value) {
+  return String(value)
+    .replace(/Â·/g, "|")
+    .replace(/â†’/g, "->")
+    .replace(/â€”/g, "-");
 }
 
 module.exports = {
