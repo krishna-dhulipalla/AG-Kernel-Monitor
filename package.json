@@ -2,7 +2,7 @@
   "name": "ag-kernel-monitor",
   "displayName": "AG Kernel Monitor",
   "publisher": "Krishnadhulipalla",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Deep token consumption and cache bloat monitoring for Google Antigravity sessions",
   "type": "module",
   "main": "./vscode/extension.cjs",
@@ -101,7 +101,9 @@
     "build": "bun build src/cli/index.ts --outdir dist --target bun",
     "build:vsx-cli": "bun build src/cli/index.ts --outfile vscode/runtime/agk-cli.js --target bun",
     "build:runtime-binaries": "bun run scripts/build-platform-binaries.ts",
-    "package:vsix": "npx @vscode/vsce package",
+    "build:runtime-binary:local": "bun run scripts/build-local-runtime.ts",
+    "build:vsix-universal": "bun run build:vsx-cli && bun run build:runtime-binary:local",
+    "package:vsix": "bun run build:vsix-universal && bun run scripts/package-vsix.ts",
     "test": "bun test"
   },
   "dependencies": {

@@ -2,11 +2,13 @@
 .github/**
 .vscode/**
 .tmp*
+*.vsix
 docs/**
 dist/**
 node_modules/**
 scripts/**
 src/**/*.test.ts
 src/**
+test-import.ts
 tsconfig.json
 bun.lock

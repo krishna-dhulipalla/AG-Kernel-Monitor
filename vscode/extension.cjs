@@ -95,14 +95,18 @@ class AgKernelCliService {
         );
       } catch (error) {
         lastError = error;
-        if (error && error.code === "ENOENT") {
+        if (isRecoverableBunLaunchError(error)) {
           continue;
         }
         throw error;
       }
     }
 
-    throw lastError || new Error("Unable to start Bun. Check the `agKernelMonitor.bunPath` setting.");
+    const runtimeError = new Error(
+      "This installation does not have a runnable AG Kernel Monitor runtime yet. Republish the extension with bundled binaries, or set `agKernelMonitor.bunPath` to a working Bun executable.",
+    );
+    runtimeError.cause = lastError || null;
+    throw runtimeError;
   }
 }
 
@@ -292,12 +296,8 @@ function getVsCodeTarget() {
 function runProcess(command, args, output, cwd) {
   return new Promise((resolve, reject) => {
     output.appendLine(`[cli] ${command} ${args.join(" ")}`);
-
-    const child = spawn(command, args, {
-      cwd,
-      env: process.env,
-      windowsHide: true,
-    });
+    const spec = buildSpawnSpec(command, args, cwd);
+    const child = spawn(spec.command, spec.args, spec.options);
 
     let stdout = "";
     let stderr = "";
@@ -329,6 +329,44 @@ function runProcess(command, args, output, cwd) {
       }
     });
   });
+}
+
+function buildSpawnSpec(command, args, cwd) {
+  const options = {
+    cwd,
+    env: process.env,
+    windowsHide: true,
+  };
+
+  if (process.platform === "win32" && /\.cmd$/i.test(command)) {
+    return {
+      command: process.env.ComSpec || "cmd.exe",
+      args: ["/d", "/s", "/c", [command, ...args].map(quoteWindowsArg).join(" ")],
+      options,
+    };
+  }
+
+  return { command, args, options };
+}
+
+function quoteWindowsArg(value) {
+  const stringValue = String(value);
+  if (!/[\s"]/u.test(stringValue)) {
+    return stringValue;
+  }
+
+  const escaped = stringValue
+    .replace(/(\\*)"/g, "$1$1\\\"")
+    .replace(/(\\+)$/g, "$1$1");
+
+  return `"${escaped}"`;
+}
+
+function isRecoverableBunLaunchError(error) {
+  const message = String(error?.message || error || "");
+  return error?.code === "ENOENT"
+    || error?.code === "EINVAL"
+    || /spawn\s+EINVAL/i.test(message);
 }
 
 function parseJsonPayload(stdout) {
@@ -476,12 +514,12 @@ function getHtml(webview, model) {
       <header class="topbar">
         <div>
           <div class="eyebrow">AG Kernel Monitor</div>
-          <div class="title">Sidebar Telemetry</div>
+          <div class="title">Conversation Overview</div>
         </div>
         <div class="actions">
           <button data-action="refresh">Refresh</button>
           <button data-action="settings">Settings</button>
-          <button data-action="output">Output</button>
+          <button data-action="output">Logs</button>
         </div>
       </header>
       ${content}
@@ -596,12 +634,14 @@ function renderReadyContent({ currentConversation, currentMeta, workspaceDetail,
 }
 
 function renderErrorContent(error, state) {
+  const runtimeMessage = describeRuntimeError(error);
+
   return `
-    ${renderSection("Extension Error", `
-      <div class="empty">${escapeHtml(String(error?.message || error || "Unknown error"))}</div>
-      <div class="detail">Published platform packages should use a bundled native runtime first. Bun is only needed as a fallback when no native runtime is available.</div>
-      <div class="detail">For local development, run <code>bun run build:vsx-cli</code> or <code>bun run scripts/build-platform-binaries.ts &lt;target&gt;</code> before testing the extension.</div>
-      <div class="detail">If you still want Bun fallback, set <code>agKernelMonitor.bunPath</code> in VS Code settings.</div>
+    ${renderSection("Runtime Unavailable", `
+      <div class="empty">${escapeHtml(runtimeMessage)}</div>
+      <div class="detail">This sidebar expects a bundled runtime inside the extension package. Bun is only a fallback for development or recovery.</div>
+      <div class="detail">For the next release, package the extension with <code>bun run package:vsix</code> so the universal VSIX includes bundled binaries.</div>
+      <div class="detail">If you need a temporary local workaround, point <code>agKernelMonitor.bunPath</code> to a working Bun executable.</div>
       ${state ? `<div class="detail">Last successful refresh: ${escapeHtml(state.loadedAt || "unknown")}</div>` : ""}
     `)}
   `;
@@ -641,6 +681,17 @@ function renderChip(label, kind) {
   return `<span class="chip chip-${escapeHtml(kind)}">${escapeHtml(label)}</span>`;
 }
 
+function describeRuntimeError(error) {
+  const message = String(error?.message || error || "Unknown error");
+  if (/runnable AG Kernel Monitor runtime/i.test(message)) {
+    return "The installed extension package does not include a runnable AG Kernel Monitor runtime.";
+  }
+  if (/spawn\s+EINVAL/i.test(message)) {
+    return "The Bun fallback could not be started by this Antigravity extension host.";
+  }
+  return message;
+}
+
 function getStyles() {
   return `
     :root {
@@ -650,21 +701,24 @@ function getStyles() {
       margin: 0;
       font-family: var(--vscode-font-family);
       color: var(--vscode-foreground);
-      background: linear-gradient(180deg, color-mix(in srgb, var(--vscode-editor-background) 92%, #0ea5e9 8%), var(--vscode-editor-background));
+      background:
+        radial-gradient(circle at top left, color-mix(in srgb, var(--vscode-editor-background) 92%, #7c3aed 8%), transparent 38%),
+        linear-gradient(180deg, color-mix(in srgb, var(--vscode-sideBar-background) 96%, #ffffff 4%), var(--vscode-sideBar-background));
     }
     .shell {
-      padding: 12px;
+      padding: 14px;
       display: flex;
       flex-direction: column;
-      gap: 12px;
+      gap: 14px;
     }
     .topbar, .hero, .panel {
-      border: 1px solid color-mix(in srgb, var(--vscode-panel-border) 75%, transparent);
-      background: color-mix(in srgb, var(--vscode-editor-background) 92%, #ffffff 8%);
-      border-radius: 14px;
+      border: 1px solid color-mix(in srgb, var(--vscode-panel-border) 68%, transparent);
+      background: color-mix(in srgb, var(--vscode-editor-background) 94%, #ffffff 6%);
+      border-radius: 18px;
+      box-shadow: 0 10px 28px color-mix(in srgb, #000000 10%, transparent);
     }
     .topbar {
-      padding: 12px;
+      padding: 14px 16px;
       display: flex;
       justify-content: space-between;
       gap: 10px;
@@ -677,43 +731,48 @@ function getStyles() {
       opacity: 0.7;
     }
     .title {
-      font-size: 18px;
-      font-weight: 700;
-      margin-top: 2px;
+      font-size: 16px;
+      font-weight: 650;
+      margin-top: 4px;
+      letter-spacing: 0.01em;
     }
     .actions {
       display: flex;
-      gap: 6px;
+      gap: 8px;
       flex-wrap: wrap;
       justify-content: flex-end;
     }
     button {
-      border: 1px solid var(--vscode-button-border, transparent);
-      background: var(--vscode-button-secondaryBackground);
+      border: 1px solid color-mix(in srgb, var(--vscode-button-border, transparent) 40%, var(--vscode-panel-border) 60%);
+      background: color-mix(in srgb, var(--vscode-button-secondaryBackground) 84%, transparent);
       color: var(--vscode-button-secondaryForeground);
       border-radius: 999px;
-      padding: 5px 10px;
+      padding: 6px 12px;
       cursor: pointer;
       font: inherit;
+      transition: background 120ms ease, border-color 120ms ease, transform 120ms ease;
     }
     button:hover {
-      background: var(--vscode-button-secondaryHoverBackground);
+      background: color-mix(in srgb, var(--vscode-button-secondaryHoverBackground) 88%, transparent);
+      border-color: color-mix(in srgb, var(--vscode-focusBorder) 55%, var(--vscode-panel-border) 45%);
+      transform: translateY(-1px);
     }
     .hero {
-      padding: 12px;
+      padding: 16px;
       display: flex;
       justify-content: space-between;
       align-items: center;
-      gap: 8px;
+      gap: 12px;
     }
     .hero-label {
-      font-size: 15px;
+      font-size: 14px;
       font-weight: 700;
+      letter-spacing: 0.02em;
     }
     .hero-meta {
       opacity: 0.7;
       font-size: 12px;
-      margin-top: 2px;
+      margin-top: 4px;
     }
     .chips {
       display: flex;
@@ -723,68 +782,72 @@ function getStyles() {
     }
     .chip {
       border-radius: 999px;
-      padding: 4px 8px;
-      font-size: 11px;
+      padding: 5px 10px;
+      font-size: 10px;
       font-weight: 700;
       text-transform: uppercase;
-      letter-spacing: 0.04em;
+      letter-spacing: 0.08em;
     }
     .chip-good {
-      background: color-mix(in srgb, #16a34a 18%, transparent);
-      color: #7dd3a6;
+      background: color-mix(in srgb, #16a34a 16%, transparent);
+      color: #8be0b3;
     }
     .chip-warn {
-      background: color-mix(in srgb, #f59e0b 18%, transparent);
-      color: #f5d27a;
+      background: color-mix(in srgb, #f59e0b 16%, transparent);
+      color: #f5d98e;
     }
     .chip-bad {
-      background: color-mix(in srgb, #ef4444 18%, transparent);
-      color: #f6a0a0;
+      background: color-mix(in srgb, #ef4444 16%, transparent);
+      color: #f4b0b0;
     }
     .panel {
-      padding: 12px;
+      padding: 14px 16px;
     }
     .panel-title {
-      font-size: 14px;
+      font-size: 12px;
       font-weight: 700;
-      margin-bottom: 10px;
+      margin-bottom: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      opacity: 0.72;
     }
     .panel-body {
       display: flex;
       flex-direction: column;
-      gap: 10px;
+      gap: 12px;
     }
     .metrics {
       display: grid;
       grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: 8px;
+      gap: 10px;
     }
     .metric {
-      padding: 8px;
-      border-radius: 10px;
-      background: color-mix(in srgb, var(--vscode-sideBar-background) 85%, #ffffff 15%);
-      border: 1px solid color-mix(in srgb, var(--vscode-panel-border) 60%, transparent);
+      padding: 10px 11px;
+      border-radius: 14px;
+      background: color-mix(in srgb, var(--vscode-sideBar-background) 90%, #ffffff 10%);
+      border: 1px solid color-mix(in srgb, var(--vscode-panel-border) 50%, transparent);
     }
     .metric-label {
       font-size: 11px;
-      opacity: 0.75;
-      margin-bottom: 4px;
+      opacity: 0.62;
+      margin-bottom: 6px;
       text-transform: uppercase;
-      letter-spacing: 0.05em;
+      letter-spacing: 0.08em;
     }
     .metric-value {
-      font-weight: 700;
+      font-weight: 650;
       line-height: 1.3;
       word-break: break-word;
     }
     .body-copy {
-      font-size: 13px;
+      font-size: 14px;
       line-height: 1.5;
+      font-weight: 600;
     }
     .detail {
       font-size: 12px;
-      line-height: 1.5;
-      opacity: 0.9;
+      line-height: 1.6;
+      opacity: 0.82;
       word-break: break-word;
     }
     .subsection {
@@ -793,44 +856,52 @@ function getStyles() {
       gap: 6px;
     }
     .subheading {
-      font-size: 12px;
+      font-size: 11px;
       font-weight: 700;
       text-transform: uppercase;
-      letter-spacing: 0.06em;
-      opacity: 0.8;
+      letter-spacing: 0.08em;
+      opacity: 0.62;
     }
     .list {
       display: flex;
       flex-direction: column;
-      gap: 8px;
+      gap: 10px;
     }
     .row {
-      padding: 8px;
-      border-radius: 10px;
-      background: color-mix(in srgb, var(--vscode-sideBar-background) 88%, #ffffff 12%);
-      border: 1px solid color-mix(in srgb, var(--vscode-panel-border) 55%, transparent);
+      padding: 10px 11px;
+      border-radius: 14px;
+      background: color-mix(in srgb, var(--vscode-sideBar-background) 91%, #ffffff 9%);
+      border: 1px solid color-mix(in srgb, var(--vscode-panel-border) 46%, transparent);
       display: flex;
-      flex-direction: column;
-      gap: 6px;
+      flex-direction: row;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 10px;
     }
+    .row-main { min-width: 0; }
     .row-title {
       font-size: 13px;
-      font-weight: 700;
+      font-weight: 650;
       line-height: 1.35;
     }
     .row-subtitle, .row-meta {
       font-size: 12px;
-      opacity: 0.8;
+      opacity: 0.72;
       line-height: 1.4;
       word-break: break-word;
     }
+    .row-meta {
+      text-align: right;
+      max-width: 36%;
+      flex: 0 0 auto;
+    }
     .empty {
-      padding: 10px;
-      border-radius: 10px;
-      background: color-mix(in srgb, var(--vscode-sideBar-background) 88%, #ffffff 12%);
+      padding: 12px;
+      border-radius: 14px;
+      background: color-mix(in srgb, var(--vscode-sideBar-background) 92%, #ffffff 8%);
       font-size: 12px;
-      line-height: 1.5;
-      opacity: 0.85;
+      line-height: 1.6;
+      opacity: 0.82;
     }
     code {
       font-family: var(--vscode-editor-font-family);

@@ -59,8 +59,7 @@ async function buildTarget(target: BuildSpec): Promise<void> {
   console.log(`Built ${target.vscodeTarget} -> ${target.outputFile}`);
 }
 
-async function main(): Promise<void> {
-  const onlyTarget = process.argv[2];
+export async function buildRuntimeTargets(onlyTarget?: string): Promise<void> {
   const targets = selectTargets(onlyTarget);
 
   rmSync("vscode/runtime/bin", { recursive: true, force: true });
@@ -70,4 +69,6 @@ async function main(): Promise<void> {
   }
 }
 
-await main();
+if (import.meta.main) {
+  await buildRuntimeTargets(process.argv[2]);
+}

@@ -4310,6 +4310,774 @@ var require_table = __commonJS((exports, module) => {
   module.exports = Table;
 });
 
+// src/uri-utils.ts
+function trimDecorators(input) {
+  return input.trim().replace(/^[>\s"'`]+/, "").replace(/[>\s"'`,.;:!?]+$/, "");
+}
+function collapseSlashes(input) {
+  return input.replace(/\/{2,}/g, "/");
+}
+function normalizeWindowsPath(pathValue) {
+  const forward = pathValue.replace(/\\/g, "/");
+  return forward.replace(WINDOWS_DRIVE_REGEX, (_, drive) => `${drive.toLowerCase()}:/`);
+}
+function normalizeFileUriLike(uri) {
+  const cleaned = trimDecorators(uri).replace(/\\/g, "/");
+  if (/^file:\/\/wsl\.localhost\//i.test(cleaned)) {
+    const suffix = cleaned.slice("file://".length);
+    const normalized = collapseSlashes(suffix).replace(/^wsl\.localhost/i, "wsl.localhost");
+    return `file://${normalized}`.replace(/\/$/, "");
+  }
+  if (/^file:\/\/\/[a-zA-Z]:/i.test(cleaned)) {
+    const suffix = cleaned.slice("file:///".length);
+    return `file:///${normalizeWindowsPath(suffix)}`.replace(/\/$/, "");
+  }
+  return cleaned.replace(/\/$/, "");
+}
+function toFileUri(pathValue) {
+  const normalizedPath = normalizeWindowsPath(pathValue);
+  if (WINDOWS_DRIVE_REGEX.test(normalizedPath)) {
+    return `file:///${normalizedPath}`.replace(/\/$/, "");
+  }
+  const unixLike = collapseSlashes(normalizedPath);
+  return `file://${unixLike.startsWith("/") ? "" : "/"}${unixLike}`.replace(/\/$/, "");
+}
+function normalizeWorkspaceUri(uri) {
+  if (!uri)
+    return null;
+  const trimmed = trimDecorators(uri);
+  if (!trimmed)
+    return null;
+  let decoded = trimmed;
+  try {
+    decoded = decodeURIComponent(trimmed);
+  } catch {
+    decoded = trimmed;
+  }
+  if (/^file:\/\//i.test(decoded)) {
+    return normalizeFileUriLike(decoded);
+  }
+  if (WINDOWS_DRIVE_REGEX.test(decoded)) {
+    return toFileUri(decoded);
+  }
+  return collapseSlashes(decoded.replace(/\\/g, "/")).replace(/\/$/, "");
+}
+function extractWorkspaceNameFromUri(uri) {
+  const normalized = normalizeWorkspaceUri(uri) ?? trimDecorators(uri);
+  const withoutScheme = normalized.replace(/^file:\/\/\/?/i, "");
+  const parts = withoutScheme.split("/").filter(Boolean);
+  const last = parts[parts.length - 1] ?? normalized;
+  return last || normalized;
+}
+function findFileUrisInText(text) {
+  const uris = new Set;
+  for (const match of text.matchAll(FILE_URI_REGEX)) {
+    const normalized = normalizeWorkspaceUri(match[0]);
+    if (normalized) {
+      uris.add(normalized);
+    }
+  }
+  return Array.from(uris);
+}
+function isPlaygroundUri(uri) {
+  const normalized = normalizeWorkspaceUri(uri);
+  if (!normalized)
+    return false;
+  return normalized.includes("/.gemini/antigravity/playground/");
+}
+function uriMatchesWorkspaceRoot(candidate, workspaceRoot) {
+  const normalizedCandidate = normalizeWorkspaceUri(candidate);
+  const normalizedRoot = normalizeWorkspaceUri(workspaceRoot);
+  if (!normalizedCandidate || !normalizedRoot) {
+    return false;
+  }
+  return normalizedCandidate === normalizedRoot || normalizedCandidate.startsWith(`${normalizedRoot}/`);
+}
+var WINDOWS_DRIVE_REGEX, FILE_URI_REGEX;
+var init_uri_utils = __esm(() => {
+  WINDOWS_DRIVE_REGEX = /^([a-zA-Z]):[\\/]/;
+  FILE_URI_REGEX = /file:\/\/(?:\/(?:[a-zA-Z]:|[a-zA-Z]%3A)|wsl\.localhost\/)[^\s"'<>)\]}]+/gi;
+});
+
+// src/ingest/storage-json.ts
+import { readFileSync as readFileSync2, existsSync as existsSync3 } from "fs";
+function parseStorageJson(customPath) {
+  const storagePath = customPath || getStorageJsonPath();
+  if (!existsSync3(storagePath)) {
+    console.warn(`\u26A0\uFE0F  storage.json not found at: ${storagePath}`);
+    return null;
+  }
+  let raw;
+  try {
+    const content = readFileSync2(storagePath, "utf-8");
+    raw = JSON.parse(content);
+  } catch (err) {
+    console.error(`\u274C Failed to parse storage.json:`, err);
+    return null;
+  }
+  const workspaces = [];
+  const profileAssociations = raw["profileAssociations"];
+  if (profileAssociations && typeof profileAssociations === "object") {
+    const wsMap = profileAssociations["workspaces"];
+    if (wsMap && typeof wsMap === "object") {
+      for (const [uri, profileId] of Object.entries(wsMap)) {
+        const hash = generateWorkspaceHash(uri);
+        const normalizedUri = normalizeWorkspaceUri(uri);
+        if (!normalizedUri)
+          continue;
+        workspaces.push({
+          hash,
+          uri,
+          normalizedUri,
+          name: extractWorkspaceNameFromUri(uri)
+        });
+      }
+    }
+  }
+  const sidebarWorkspaces = [];
+  const unifiedState = raw["antigravityUnifiedStateSync"];
+  if (unifiedState && typeof unifiedState === "object") {
+    const sidebar = unifiedState["sidebarWorkspaces"];
+    if (Array.isArray(sidebar)) {
+      for (const entry of sidebar) {
+        if (entry && typeof entry === "object" && "uri" in entry) {
+          sidebarWorkspaces.push({
+            uri: String(entry.uri),
+            name: extractWorkspaceNameFromUri(String(entry.uri)),
+            isActive: Boolean(entry.isActive)
+          });
+        }
+      }
+    } else if (typeof sidebar === "string") {
+      try {
+        const parsed = JSON.parse(sidebar);
+        if (Array.isArray(parsed)) {
+          for (const entry of parsed) {
+            if (entry && typeof entry === "object" && "uri" in entry) {
+              sidebarWorkspaces.push({
+                uri: String(entry.uri),
+                name: extractWorkspaceNameFromUri(String(entry.uri)),
+                isActive: Boolean(entry.isActive)
+              });
+            }
+          }
+        }
+      } catch {}
+    }
+  }
+  const scratchWorkspaces = [];
+  if (unifiedState && typeof unifiedState === "object") {
+    const scratch = unifiedState["scratchWorkspaces"];
+    if (Array.isArray(scratch)) {
+      for (const entry of scratch) {
+        if (entry && typeof entry === "object" && "uri" in entry) {
+          scratchWorkspaces.push({
+            uri: String(entry.uri),
+            name: extractWorkspaceNameFromUri(String(entry.uri))
+          });
+        }
+      }
+    } else if (typeof scratch === "string") {
+      try {
+        const parsed = JSON.parse(scratch);
+        if (Array.isArray(parsed)) {
+          for (const entry of parsed) {
+            if (entry && typeof entry === "object" && "uri" in entry) {
+              scratchWorkspaces.push({
+                uri: String(entry.uri),
+                name: extractWorkspaceNameFromUri(String(entry.uri))
+              });
+            }
+          }
+        }
+      } catch {}
+    }
+  }
+  return { workspaces, sidebarWorkspaces, scratchWorkspaces, raw };
+}
+function generateWorkspaceHash(uri) {
+  const hasher = new Bun.CryptoHasher("md5");
+  hasher.update(uri);
+  return hasher.digest("hex");
+}
+var init_storage_json = __esm(() => {
+  init_paths();
+  init_uri_utils();
+});
+
+// src/ingest/state-vscdb.ts
+import { Database as Database2 } from "bun:sqlite";
+import { existsSync as existsSync4 } from "fs";
+function readItemTableRawValue(db, key) {
+  try {
+    const row = db.query("SELECT value FROM ItemTable WHERE key = ?1").get(key);
+    if (!row)
+      return null;
+    if (typeof row.value === "string")
+      return row.value;
+    if (Buffer.isBuffer(row.value))
+      return row.value.toString("utf-8");
+    if (row.value instanceof Uint8Array)
+      return new TextDecoder().decode(row.value);
+    return null;
+  } catch {
+    return null;
+  }
+}
+function tryParseJson(raw) {
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+function isLikelyBase64(raw) {
+  const trimmed = raw.trim();
+  return trimmed.length >= 16 && trimmed.length % 4 === 0 && /^[A-Za-z0-9+/=\r\n]+$/.test(trimmed);
+}
+function toPrintableText(input) {
+  return input.replace(/[^\x20-\x7E\r\n\t]+/g, " ");
+}
+function decodeBase64Printable(candidate) {
+  return toPrintableText(Buffer.from(candidate, "base64").toString("utf-8")).trim();
+}
+function scoreDecodedText(text) {
+  let score = 0;
+  score += (text.match(/file:\/\/\/|https?:\/\//g) ?? []).length * 20;
+  score += (text.match(/[A-Za-z]{4,}/g) ?? []).length;
+  if (/\{\".+/.test(text))
+    score += 10;
+  return score;
+}
+function sanitizeTitle(title) {
+  return title.replace(/^[^A-Za-z0-9]+/, "").replace(/\s+\$?$/, "").replace(/\s+[A-Za-z]$/, "").replace(/\s{2,}/g, " ").trim();
+}
+function isUsableTitle(title) {
+  if (title.length < 6)
+    return false;
+  if (UUID_REGEX.test(title))
+    return false;
+  UUID_REGEX.lastIndex = 0;
+  if (/notify_user/i.test(title))
+    return false;
+  if (/^(mainR|masterR)/i.test(title))
+    return false;
+  if (/tokens truncated/i.test(title))
+    return false;
+  if (/[{}]/.test(title))
+    return false;
+  const words = title.match(/[A-Za-z]{3,}/g) ?? [];
+  return words.length >= 2;
+}
+function decodeNestedPayloads(segment) {
+  const decoded = [];
+  const seen = new Set;
+  for (const match of segment.matchAll(BASE64_REGEX)) {
+    const candidate = match[0];
+    if (candidate.length < 24 || candidate.length > 16000)
+      continue;
+    try {
+      const variants = [candidate];
+      if (candidate.length > 25) {
+        variants.push(candidate.slice(1));
+      }
+      let printable = "";
+      let bestScore = -1;
+      for (const variant of variants) {
+        const decoded2 = decodeBase64Printable(variant);
+        const score = scoreDecodedText(decoded2);
+        if (score > bestScore) {
+          printable = decoded2;
+          bestScore = score;
+        }
+      }
+      if (!printable || printable.length < 8)
+        continue;
+      if (!/(file:\/\/\/|https?:\/\/|[A-Za-z]{4,} [A-Za-z]{4,}|\{\".+)/.test(printable))
+        continue;
+      if (seen.has(printable))
+        continue;
+      seen.add(printable);
+      decoded.push(printable);
+    } catch {
+      continue;
+    }
+  }
+  return decoded;
+}
+function extractTitle(segment, nestedPayloads, conversationId) {
+  const sources = [...nestedPayloads, toPrintableText(segment)];
+  for (const source of sources) {
+    const prefix = source.split(conversationId)[0] ?? source;
+    const quoteMatch = prefix.match(/"([^"]{6,120})"/);
+    if (quoteMatch) {
+      const title = sanitizeTitle(quoteMatch[1]);
+      if (isUsableTitle(title) && !/^(file:\/\/|https?:\/\/)/i.test(title)) {
+        return title;
+      }
+    }
+    const titleMatch = prefix.match(TITLE_REGEX);
+    if (titleMatch) {
+      const title = sanitizeTitle(titleMatch[1]);
+      if (isUsableTitle(title) && !/^(file:\/\/|https?:\/\/)/i.test(title)) {
+        return title;
+      }
+    }
+  }
+  return;
+}
+function extractMessageCount(text) {
+  const directMatch = text.match(/(?:messageCount|chat messages?)["\s:=-]+(\d{1,5})/i);
+  if (directMatch) {
+    return parseInt(directMatch[1], 10);
+  }
+  return;
+}
+function decodeStateValue(raw) {
+  const parsedJson = tryParseJson(raw);
+  if (parsedJson !== null) {
+    return {
+      raw,
+      parsedJson,
+      decodedText: raw,
+      base64Decoded: false
+    };
+  }
+  if (isLikelyBase64(raw)) {
+    try {
+      return {
+        raw,
+        parsedJson: null,
+        decodedText: Buffer.from(raw, "base64").toString("utf-8"),
+        base64Decoded: true
+      };
+    } catch {}
+  }
+  return {
+    raw,
+    parsedJson: null,
+    decodedText: raw,
+    base64Decoded: false
+  };
+}
+function extractTrajectoriesFromJson(value) {
+  const entries = Array.isArray(value) ? value : typeof value === "object" && value !== null ? Object.entries(value).map(([key, entry]) => ({
+    conversationId: key,
+    ...typeof entry === "object" && entry !== null ? entry : {}
+  })) : [];
+  const results = [];
+  for (const entry of entries) {
+    if (!entry || typeof entry !== "object")
+      continue;
+    const record = entry;
+    const conversationId = String(record.conversationId || record.id || "");
+    if (!conversationId)
+      continue;
+    const workspaceUri = normalizeWorkspaceUri(typeof record.workspaceUri === "string" ? record.workspaceUri : undefined);
+    results.push({
+      conversationId,
+      title: typeof record.title === "string" ? record.title : undefined,
+      messageCount: typeof record.messageCount === "number" ? record.messageCount : undefined,
+      lastActivity: typeof record.lastActivity === "string" ? record.lastActivity : undefined,
+      workspaceUri: workspaceUri ?? undefined,
+      workspaceUris: workspaceUri ? [workspaceUri] : [],
+      rawSnippet: undefined
+    });
+  }
+  return results;
+}
+function extractTrajectorySummariesFromEncodedText(text) {
+  const matches = Array.from(text.matchAll(UUID_REGEX));
+  const results = [];
+  for (let index = 0;index < matches.length; index++) {
+    const current = matches[index];
+    const conversationId = current[0];
+    const currentIndex = current.index ?? 0;
+    const nextIndex = matches[index + 1]?.index ?? text.length;
+    const previousBoundary = matches[index - 1] ? (matches[index - 1].index ?? 0) + matches[index - 1][0].length : 0;
+    const start = Math.max(previousBoundary, currentIndex - 160);
+    const end = Math.min(nextIndex, currentIndex + 4000);
+    const segment = text.slice(start, end);
+    const nestedPayloads = decodeNestedPayloads(segment);
+    const combinedText = [toPrintableText(segment), ...nestedPayloads].join(`
+`);
+    const workspaceUris = findFileUrisInText(combinedText);
+    const usefulWorkspaceUris = workspaceUris.filter((uri) => !uri.includes("/.gemini/antigravity/brain/"));
+    const workspaceUri = usefulWorkspaceUris[0] ?? workspaceUris[0];
+    const title = extractTitle(segment, nestedPayloads, conversationId);
+    const messageCount = extractMessageCount(combinedText);
+    results.push({
+      conversationId,
+      title,
+      messageCount,
+      workspaceUri,
+      workspaceUris: usefulWorkspaceUris.length > 0 ? usefulWorkspaceUris : workspaceUris,
+      rawSnippet: combinedText.slice(0, 800)
+    });
+  }
+  return results;
+}
+function extractChatSessions(value) {
+  if (!value || typeof value !== "object") {
+    return [];
+  }
+  const root = value;
+  const rawEntries = Array.isArray(root.entries) ? root.entries : root.entries && typeof root.entries === "object" ? Object.values(root.entries) : Array.isArray(value) ? value : Object.values(root);
+  const sessions = [];
+  for (const entry of rawEntries) {
+    if (!entry || typeof entry !== "object")
+      continue;
+    const record = entry;
+    const sessionId = String(record.sessionId || record.id || "");
+    if (!sessionId)
+      continue;
+    const workspaceUri = normalizeWorkspaceUri(typeof record.workspaceUri === "string" ? record.workspaceUri : typeof record.workspaceFolder === "string" ? record.workspaceFolder : typeof record.folder === "string" ? record.folder : undefined);
+    sessions.push({
+      sessionId,
+      workspaceUri: workspaceUri ?? undefined,
+      title: typeof record.title === "string" ? record.title : undefined,
+      lastModified: typeof record.lastModified === "string" ? record.lastModified : typeof record.updatedAt === "string" ? record.updatedAt : undefined
+    });
+  }
+  return sessions;
+}
+function decodeObjectLikeValue(raw) {
+  const decoded = decodeStateValue(raw);
+  if (decoded.parsedJson && typeof decoded.parsedJson === "object") {
+    return decoded.parsedJson;
+  }
+  const printable = toPrintableText(decoded.decodedText).trim();
+  return printable || null;
+}
+function parseStateVscdb(customPath) {
+  const dbPath = customPath || getGlobalStateDbPath();
+  if (!existsSync4(dbPath)) {
+    console.warn(`\u26A0\uFE0F  state.vscdb not found at: ${dbPath}`);
+    return null;
+  }
+  let db;
+  try {
+    db = new Database2(dbPath, { readonly: true });
+  } catch (err) {
+    console.error("\u274C Failed to open state.vscdb:", err);
+    return null;
+  }
+  try {
+    const sessionToWorkspace = new Map;
+    const chatIndexRaw = readItemTableRawValue(db, "chat.ChatSessionStore.index");
+    const chatSessions = chatIndexRaw ? extractChatSessions(decodeStateValue(chatIndexRaw).parsedJson) : [];
+    for (const session of chatSessions) {
+      if (session.workspaceUri) {
+        sessionToWorkspace.set(session.sessionId, session.workspaceUri);
+      }
+    }
+    const trajectoriesRaw = readItemTableRawValue(db, "antigravityUnifiedStateSync.trajectorySummaries");
+    let trajectories = [];
+    if (trajectoriesRaw) {
+      const decoded = decodeStateValue(trajectoriesRaw);
+      trajectories = decoded.parsedJson !== null ? extractTrajectoriesFromJson(decoded.parsedJson) : extractTrajectorySummariesFromEncodedText(decoded.decodedText);
+    }
+    for (const trajectory of trajectories) {
+      if (trajectory.workspaceUri) {
+        sessionToWorkspace.set(trajectory.conversationId, trajectory.workspaceUri);
+      }
+    }
+    const creditsRaw = readItemTableRawValue(db, "antigravityUnifiedStateSync.modelCredits");
+    const creditsValue = creditsRaw ? decodeObjectLikeValue(creditsRaw) : null;
+    let modelCredits = null;
+    if (creditsValue && typeof creditsValue === "object") {
+      const record = creditsValue;
+      modelCredits = {
+        used: typeof record.used === "number" ? record.used : 0,
+        total: typeof record.total === "number" ? record.total : 0,
+        resetDate: typeof record.resetDate === "string" ? record.resetDate : undefined,
+        raw: creditsValue
+      };
+    } else if (creditsValue) {
+      modelCredits = {
+        used: 0,
+        total: 0,
+        raw: creditsValue
+      };
+    }
+    const modelPreferencesRaw = readItemTableRawValue(db, "antigravityUnifiedStateSync.modelPreferences");
+    const modelPreferences = modelPreferencesRaw ? decodeObjectLikeValue(modelPreferencesRaw) : null;
+    return {
+      chatSessions,
+      trajectories,
+      modelCredits,
+      modelPreferences,
+      sessionToWorkspace
+    };
+  } finally {
+    db.close();
+  }
+}
+var UUID_REGEX, BASE64_REGEX, TITLE_REGEX;
+var init_state_vscdb = __esm(() => {
+  init_paths();
+  init_uri_utils();
+  UUID_REGEX = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/ig;
+  BASE64_REGEX = /(?:[A-Za-z0-9+/]{24,}={0,2})/g;
+  TITLE_REGEX = /([A-Z][A-Za-z0-9&/()'.,:_-]*(?: [A-Za-z0-9&/()'.,:_-]+){1,12})/;
+});
+
+// src/ingest/workspace-storage.ts
+import { readdirSync, readFileSync as readFileSync3, existsSync as existsSync5 } from "fs";
+import { join as join3 } from "path";
+function scanWorkspaceStorage(customPath) {
+  const storageDir = customPath || getWorkspaceStorageDir();
+  if (!existsSync5(storageDir)) {
+    console.warn(`\u26A0\uFE0F  workspaceStorage directory not found at: ${storageDir}`);
+    return [];
+  }
+  const entries = [];
+  try {
+    const hashDirs = readdirSync(storageDir, { withFileTypes: true });
+    for (const dir of hashDirs) {
+      if (!dir.isDirectory())
+        continue;
+      const wsJsonPath = join3(storageDir, dir.name, "workspace.json");
+      if (!existsSync5(wsJsonPath))
+        continue;
+      try {
+        const content = readFileSync3(wsJsonPath, "utf-8");
+        const parsed = JSON.parse(content);
+        const uri = parsed.folder || parsed.workspace || parsed.uri || "";
+        if (uri) {
+          const normalizedUri = normalizeWorkspaceUri(String(uri));
+          if (!normalizedUri)
+            continue;
+          entries.push({
+            hash: dir.name,
+            uri: String(uri),
+            normalizedUri,
+            name: extractWorkspaceNameFromUri(String(uri))
+          });
+        }
+      } catch {}
+    }
+  } catch (err) {
+    console.error(`\u274C Failed to scan workspaceStorage:`, err);
+  }
+  return entries;
+}
+var init_workspace_storage = __esm(() => {
+  init_paths();
+  init_uri_utils();
+});
+
+// src/scanner/conversation-scanner.ts
+import { readdirSync as readdirSync2, statSync, readFileSync as readFileSync4, existsSync as existsSync6 } from "fs";
+import { join as join4, basename, extname } from "path";
+function scanConversations(customPath) {
+  const convDir = customPath || getConversationsDir();
+  if (!existsSync6(convDir)) {
+    console.warn(`\u26A0\uFE0F  conversations directory not found at: ${convDir}`);
+    return [];
+  }
+  const entries = [];
+  try {
+    const files = readdirSync2(convDir);
+    for (const file of files) {
+      if (extname(file) !== ".pb")
+        continue;
+      const filePath = join4(convDir, file);
+      const id = basename(file, ".pb");
+      try {
+        const stats = statSync(filePath);
+        const annotation = readAnnotation(id);
+        entries.push({
+          id,
+          pbFilePath: filePath,
+          pbFileBytes: stats.size,
+          createdAt: stats.birthtime,
+          lastModified: stats.mtime,
+          annotationTimestamp: annotation?.lastUserViewTime ?? null
+        });
+      } catch {}
+    }
+  } catch (err) {
+    console.error(`\u274C Failed to scan conversations:`, err);
+  }
+  return entries.sort((a, b) => b.pbFileBytes - a.pbFileBytes);
+}
+function readAnnotation(conversationId, customDir) {
+  const annDir = customDir || getAnnotationsDir();
+  const annPath = join4(annDir, `${conversationId}.pbtxt`);
+  if (!existsSync6(annPath))
+    return null;
+  try {
+    const content = readFileSync4(annPath, "utf-8");
+    let lastUserViewTime = null;
+    const nestedSeconds = content.match(/last_user_view_time\s*:\s*\{\s*seconds\s*:\s*(\d+)/);
+    const flatValue = content.match(/last_user_view_time\s*:\s*(\d+)/);
+    if (nestedSeconds) {
+      lastUserViewTime = parseInt(nestedSeconds[1], 10) * 1000;
+    } else if (flatValue) {
+      lastUserViewTime = parseInt(flatValue[1], 10) * 1000;
+    }
+    return {
+      conversationId,
+      lastUserViewTime,
+      rawContent: content
+    };
+  } catch {
+    return null;
+  }
+}
+var init_conversation_scanner = __esm(() => {
+  init_paths();
+});
+
+// src/scanner/brain-scanner.ts
+import { readdirSync as readdirSync3, statSync as statSync2, readFileSync as readFileSync5, existsSync as existsSync7 } from "fs";
+import { join as join5 } from "path";
+function dirStats(dirPath) {
+  let totalBytes = 0;
+  let fileCount = 0;
+  try {
+    const entries = readdirSync3(dirPath, { withFileTypes: true });
+    for (const entry of entries) {
+      const fullPath = join5(dirPath, entry.name);
+      if (entry.isDirectory()) {
+        const sub = dirStats(fullPath);
+        totalBytes += sub.totalBytes;
+        fileCount += sub.fileCount;
+      } else if (entry.isFile()) {
+        try {
+          totalBytes += statSync2(fullPath).size;
+          fileCount++;
+        } catch {}
+      }
+    }
+  } catch {}
+  return { totalBytes, fileCount };
+}
+function countResolvedVersions(dirPath) {
+  let count = 0;
+  try {
+    const entries = readdirSync3(dirPath, { withFileTypes: true });
+    for (const entry of entries) {
+      if (entry.isFile() && /\.resolved\.\d+$/.test(entry.name)) {
+        count++;
+      }
+      if (entry.isDirectory()) {
+        count += countResolvedVersions(join5(dirPath, entry.name));
+      }
+    }
+  } catch {}
+  return count;
+}
+function countArtifacts(dirPath) {
+  let count = 0;
+  try {
+    const entries = readdirSync3(dirPath, { withFileTypes: true });
+    for (const entry of entries) {
+      if (entry.isDirectory()) {
+        count += countArtifacts(join5(dirPath, entry.name));
+      } else if (entry.isFile()) {
+        if (!entry.name.endsWith(".metadata.json") && !/\.resolved\.\d+$/.test(entry.name) && entry.name !== "overview.txt") {
+          count++;
+        }
+      }
+    }
+  } catch {}
+  return count;
+}
+function extractWorkspaceUris(dirPath) {
+  const uris = new Set;
+  try {
+    const entries = readdirSync3(dirPath, { withFileTypes: true });
+    for (const entry of entries) {
+      const fullPath = join5(dirPath, entry.name);
+      if (entry.isDirectory()) {
+        for (const uri of extractWorkspaceUris(fullPath)) {
+          uris.add(uri);
+        }
+      } else if (entry.isFile() && (entry.name.endsWith(".md") || entry.name.endsWith(".txt"))) {
+        try {
+          const content = readFileSync5(fullPath, "utf-8");
+          for (const uri of findFileUrisInText(content)) {
+            uris.add(uri);
+          }
+        } catch {}
+      }
+    }
+  } catch {}
+  return Array.from(uris);
+}
+function extractBrainTitle(dirPath) {
+  const preferredFiles = [
+    "task.md",
+    "walkthrough.md",
+    "overview.txt",
+    "task.md.metadata.json",
+    "walkthrough.md.metadata.json"
+  ];
+  for (const fileName of preferredFiles) {
+    const filePath = join5(dirPath, fileName);
+    if (!existsSync7(filePath))
+      continue;
+    try {
+      const content = readFileSync5(filePath, "utf-8");
+      const headingMatch = content.match(/^#\s+(.+)$/m);
+      if (headingMatch?.[1]) {
+        return headingMatch[1].trim();
+      }
+      if (fileName.endsWith(".json")) {
+        const parsed = JSON.parse(content);
+        if (typeof parsed.summary === "string" && parsed.summary.trim().length >= 6) {
+          return parsed.summary.trim();
+        }
+      }
+    } catch {
+      continue;
+    }
+  }
+  return;
+}
+function scanBrainFolders(customPath) {
+  const brainDir = customPath || getBrainDir();
+  if (!existsSync7(brainDir)) {
+    console.warn(`\u26A0\uFE0F  brain directory not found at: ${brainDir}`);
+    return [];
+  }
+  const entries = [];
+  try {
+    const dirs = readdirSync3(brainDir, { withFileTypes: true });
+    for (const dir of dirs) {
+      if (!dir.isDirectory())
+        continue;
+      const name = dir.name;
+      if (name.startsWith("."))
+        continue;
+      const brainPath = join5(brainDir, name);
+      const stats = dirStats(brainPath);
+      const resolvedCount = countResolvedVersions(brainPath);
+      const artifactCount = countArtifacts(brainPath);
+      const workspaceUris = extractWorkspaceUris(brainPath);
+      entries.push({
+        conversationId: name,
+        totalBytes: stats.totalBytes,
+        fileCount: stats.fileCount,
+        artifactCount,
+        resolvedVersionCount: resolvedCount,
+        workspaceUris,
+        title: extractBrainTitle(brainPath),
+        brainPath
+      });
+    }
+  } catch (err) {
+    console.error(`\u274C Failed to scan brain folders:`, err);
+  }
+  return entries.sort((a, b) => b.totalBytes - a.totalBytes);
+}
+var init_brain_scanner = __esm(() => {
+  init_paths();
+  init_uri_utils();
+});
+
 // src/metrics/estimator.ts
 function estimateConversationMetrics(input) {
   const { pbFileBytes, brainFolderBytes, messageCount, resolvedVersionCount, bytesPerToken } = input;
@@ -4554,6 +5322,287 @@ var init_log_signals = __esm(() => {
   CONVERSATION_REGEX = /([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i;
 });
 
+// src/ingest/reconciler.ts
+function toIsoString(timestamp) {
+  const date = new Date(timestamp.replace(" ", "T"));
+  return Number.isNaN(date.getTime()) ? null : date.toISOString();
+}
+function buildWorkspaceRegistry(storageWorkspaces, workspaceStorageEntries) {
+  const registry = new Map;
+  const addWorkspace = (entry) => {
+    if (!entry.normalizedUri)
+      return;
+    if (registry.has(entry.normalizedUri))
+      return;
+    registry.set(entry.normalizedUri, {
+      id: entry.hash,
+      uri: entry.uri,
+      normalizedUri: entry.normalizedUri,
+      name: entry.name || extractWorkspaceNameFromUri(entry.uri)
+    });
+  };
+  for (const workspace of storageWorkspaces) {
+    addWorkspace(workspace);
+  }
+  for (const workspace of workspaceStorageEntries) {
+    addWorkspace(workspace);
+  }
+  registry.set(UNMAPPED_WORKSPACE_URI, {
+    id: UNMAPPED_WORKSPACE_ID,
+    uri: UNMAPPED_WORKSPACE_URI,
+    normalizedUri: UNMAPPED_WORKSPACE_URI,
+    name: "[Unmapped]"
+  });
+  return registry;
+}
+function findWorkspaceMatch(candidateUris, registry, sourcePrefix, exactConfidence, prefixConfidence) {
+  for (const candidate of candidateUris) {
+    const normalizedCandidate = normalizeWorkspaceUri(candidate);
+    if (!normalizedCandidate)
+      continue;
+    const exact = registry.get(normalizedCandidate);
+    if (exact && exact.id !== UNMAPPED_WORKSPACE_ID) {
+      return {
+        workspaceId: exact.id,
+        workspaceUri: exact.uri,
+        mappingSource: `${sourcePrefix}_exact`,
+        mappingConfidence: exactConfidence,
+        mappingNotes: `Matched normalized workspace URI from ${sourcePrefix}.`
+      };
+    }
+    for (const workspace of registry.values()) {
+      if (workspace.id === UNMAPPED_WORKSPACE_ID)
+        continue;
+      if (uriMatchesWorkspaceRoot(normalizedCandidate, workspace.normalizedUri)) {
+        return {
+          workspaceId: workspace.id,
+          workspaceUri: workspace.uri,
+          mappingSource: `${sourcePrefix}_prefix`,
+          mappingConfidence: prefixConfidence,
+          mappingNotes: `Matched a file URI beneath the workspace root from ${sourcePrefix}.`
+        };
+      }
+    }
+  }
+  return null;
+}
+function findWorkspaceByTitleHint(titleCandidates, registry) {
+  const matches = new Map;
+  for (const rawTitle of titleCandidates) {
+    const title = rawTitle?.trim();
+    if (!title)
+      continue;
+    const normalizedTitle = title.toLowerCase();
+    for (const workspace2 of registry.values()) {
+      if (workspace2.id === UNMAPPED_WORKSPACE_ID)
+        continue;
+      const name = workspace2.name.trim();
+      if (name.length < 4)
+        continue;
+      if (normalizedTitle.includes(name.toLowerCase())) {
+        matches.set(workspace2.id, workspace2);
+      }
+    }
+  }
+  if (matches.size !== 1) {
+    return null;
+  }
+  const workspace = Array.from(matches.values())[0];
+  return {
+    workspaceId: workspace.id,
+    workspaceUri: workspace.uri,
+    mappingSource: "title_hint",
+    mappingConfidence: 0.55,
+    mappingNotes: "Matched the workspace name from conversation or brain-title text because no URI signal was available."
+  };
+}
+function buildUnmappedReason(trajectory, brain) {
+  const stateUriCount = trajectory?.workspaceUris.length ?? 0;
+  const brainUriCount = brain?.workspaceUris.length ?? 0;
+  const titleHints = [trajectory?.title, brain?.title].filter((value) => Boolean(value?.trim()));
+  if (stateUriCount === 0 && brainUriCount === 0 && titleHints.length === 0) {
+    return "No workspace URI, brain URI, or usable title hint was found.";
+  }
+  const parts = [];
+  if (stateUriCount > 0) {
+    parts.push(`state.vscdb exposed ${stateUriCount} workspace URI${stateUriCount > 1 ? "s" : ""} but none matched a known workspace`);
+  }
+  if (brainUriCount > 0) {
+    parts.push(`brain artifacts exposed ${brainUriCount} workspace URI${brainUriCount > 1 ? "s" : ""} but none matched a known workspace`);
+  }
+  if (titleHints.length > 0) {
+    parts.push(`title hints (${titleHints.map((title) => `"${title}"`).join(", ")}) did not uniquely identify a workspace`);
+  }
+  return `${parts.join("; ")}.`;
+}
+function chooseLastActive(conversationId, annotationTimestamp, lastModified, logSignals) {
+  const logTimestamp = logSignals.lastActivityAt.get(conversationId);
+  if (logTimestamp) {
+    const iso = toIsoString(logTimestamp);
+    if (iso) {
+      return { lastActiveAt: iso, activitySource: "log" };
+    }
+  }
+  if (annotationTimestamp) {
+    return {
+      lastActiveAt: new Date(annotationTimestamp).toISOString(),
+      activitySource: "annotation"
+    };
+  }
+  return {
+    lastActiveAt: lastModified.toISOString(),
+    activitySource: "filesystem"
+  };
+}
+function indexTrajectories(trajectories) {
+  const map = new Map;
+  for (const trajectory of trajectories) {
+    map.set(trajectory.conversationId, trajectory);
+  }
+  return map;
+}
+async function reconcile(db, config) {
+  const stats = {
+    workspacesFound: 0,
+    conversationsTotal: 0,
+    conversationsMapped: 0,
+    conversationsUnmapped: 0,
+    brainFoldersFound: 0,
+    orphanBrainFolders: 0,
+    orphanAnnotations: 0,
+    totalPbBytes: 0,
+    totalBrainBytes: 0
+  };
+  const storageResult = parseStorageJson();
+  const workspaceStorageEntries = scanWorkspaceStorage();
+  const workspaceRegistry = buildWorkspaceRegistry(storageResult?.workspaces ?? [], workspaceStorageEntries);
+  const stateResult = parseStateVscdb();
+  const trajectoryByConversation = indexTrajectories(stateResult?.trajectories ?? []);
+  const logSignals = scanLatestLogFile();
+  const conversations = scanConversations();
+  const brainEntries = scanBrainFolders();
+  const brainByConversation = new Map;
+  for (const brainEntry of brainEntries) {
+    brainByConversation.set(brainEntry.conversationId, brainEntry);
+  }
+  const now = new Date().toISOString();
+  for (const workspace of workspaceRegistry.values()) {
+    db.upsertWorkspace({
+      id: workspace.id,
+      uri: workspace.uri,
+      name: workspace.name,
+      last_seen: now
+    });
+  }
+  stats.workspacesFound = workspaceRegistry.size;
+  const scannedConversationIds = [];
+  const activeConversationId = logSignals.activeConversationId;
+  for (const conversationEntry of conversations) {
+    scannedConversationIds.push(conversationEntry.id);
+    const brain = brainByConversation.get(conversationEntry.id);
+    const trajectory = trajectoryByConversation.get(conversationEntry.id);
+    const stateUris = trajectory?.workspaceUris ?? (trajectory?.workspaceUri ? [trajectory.workspaceUri] : []);
+    const brainUris = brain?.workspaceUris ?? [];
+    const mapping = findWorkspaceMatch(stateUris, workspaceRegistry, "state_vscdb", 1, 0.92) ?? findWorkspaceMatch(brainUris, workspaceRegistry, "brain_artifact", 0.8, 0.72) ?? findWorkspaceByTitleHint([trajectory?.title, brain?.title], workspaceRegistry) ?? {
+      workspaceId: UNMAPPED_WORKSPACE_ID,
+      workspaceUri: UNMAPPED_WORKSPACE_URI,
+      mappingSource: "unmapped",
+      mappingConfidence: 0,
+      mappingNotes: buildUnmappedReason(trajectory, brain)
+    };
+    if (mapping.workspaceId === UNMAPPED_WORKSPACE_ID) {
+      stats.conversationsUnmapped++;
+    } else {
+      stats.conversationsMapped++;
+    }
+    const directMessageCount = logSignals.messageCounts.get(conversationEntry.id);
+    const messageCount = directMessageCount ?? trajectory?.messageCount ?? null;
+    const messageCountSource = directMessageCount !== undefined ? "log" : trajectory?.messageCount !== undefined ? "state_vscdb" : null;
+    const activity = chooseLastActive(conversationEntry.id, conversationEntry.annotationTimestamp, conversationEntry.lastModified, logSignals);
+    const metrics = estimateConversationMetrics({
+      pbFileBytes: conversationEntry.pbFileBytes,
+      brainFolderBytes: brain?.totalBytes ?? 0,
+      messageCount,
+      resolvedVersionCount: brain?.resolvedVersionCount ?? 0,
+      bytesPerToken: config.bytesPerToken
+    });
+    const canonicalConversation = {
+      id: conversationEntry.id,
+      workspace_id: mapping.workspaceId,
+      title: trajectory?.title ?? brain?.title ?? null,
+      pb_file_bytes: conversationEntry.pbFileBytes,
+      brain_folder_bytes: brain?.totalBytes ?? 0,
+      brain_artifact_count: brain?.artifactCount ?? 0,
+      resolved_version_count: brain?.resolvedVersionCount ?? 0,
+      message_count: messageCount,
+      message_count_source: messageCountSource,
+      estimated_prompt_tokens: metrics.estimatedPromptTokens,
+      estimated_artifact_tokens: metrics.estimatedArtifactTokens,
+      estimated_tokens: metrics.estimatedTotalTokens,
+      annotation_timestamp: conversationEntry.annotationTimestamp,
+      created_at: conversationEntry.createdAt.toISOString(),
+      last_modified: conversationEntry.lastModified.toISOString(),
+      last_active_at: activity.lastActiveAt,
+      activity_source: activity.activitySource,
+      mapping_source: mapping.mappingSource,
+      mapping_confidence: mapping.mappingConfidence,
+      mapping_notes: mapping.mappingNotes,
+      is_active: activeConversationId === conversationEntry.id ? 1 : 0
+    };
+    db.upsertConversation(canonicalConversation);
+    takeSnapshotIfChanged(db, canonicalConversation);
+    stats.totalPbBytes += canonicalConversation.pb_file_bytes;
+    stats.totalBrainBytes += canonicalConversation.brain_folder_bytes;
+  }
+  db.deleteConversationsNotIn(scannedConversationIds);
+  for (const workspace of workspaceRegistry.values()) {
+    db.updateWorkspaceAggregates(workspace.id);
+  }
+  const scannedConversationIdSet = new Set(scannedConversationIds);
+  for (const brainEntry of brainEntries) {
+    if (!scannedConversationIdSet.has(brainEntry.conversationId)) {
+      stats.orphanBrainFolders++;
+    }
+  }
+  stats.conversationsTotal = conversations.length;
+  stats.brainFoldersFound = brainEntries.length;
+  return stats;
+}
+var UNMAPPED_WORKSPACE_ID = "__unmapped__", UNMAPPED_WORKSPACE_URI = "__unmapped__";
+var init_reconciler = __esm(() => {
+  init_storage_json();
+  init_state_vscdb();
+  init_workspace_storage();
+  init_conversation_scanner();
+  init_brain_scanner();
+  init_log_signals();
+  init_uri_utils();
+});
+
+// src/watcher/reconcile-helper.ts
+async function reconcileMonitorData(db, config) {
+  if (!reconcileInFlight) {
+    reconcileInFlight = reconcile(db, config).then(() => {
+      return;
+    }).finally(() => {
+      reconcileInFlight = null;
+    });
+  }
+  await reconcileInFlight;
+}
+async function ensureConversationLoaded(db, config, conversationId) {
+  const existing = db.getConversation(conversationId);
+  if (existing) {
+    return existing;
+  }
+  await reconcileMonitorData(db, config);
+  return db.getConversation(conversationId);
+}
+var reconcileInFlight = null;
+var init_reconcile_helper = __esm(() => {
+  init_reconciler();
+});
+
 // src/watcher/file-watcher.ts
 var exports_file_watcher = {};
 __export(exports_file_watcher, {
@@ -4564,7 +5613,7 @@ import { basename as basename2, extname as extname2, join as join7 } from "path"
 function startFileWatcher(db, config) {
   const conversationsDir = getConversationsDir();
   if (!existsSync9(conversationsDir)) {
-    console.warn(source_default.yellow(`\u26A0\uFE0F  Cannot watch \u2014 conversations directory not found: ${conversationsDir}`));
+    console.warn(source_default.yellow(`Cannot watch - conversations directory not found: ${conversationsDir}`));
     return;
   }
   const debounceTimers = new Map;
@@ -4581,14 +5630,14 @@ function startFileWatcher(db, config) {
       }, DEBOUNCE_MS));
     });
     watcher.on("error", (err) => {
-      console.error(source_default.red("\u274C File watcher error:"), err.message);
+      console.error(source_default.red("File watcher error:"), err.message);
     });
     console.log(source_default.dim(`   Watching: ${conversationsDir}`));
   } catch (err) {
-    console.error(source_default.red("\u274C Failed to start file watcher:"), err);
+    console.error(source_default.red("Failed to start file watcher:"), err);
   }
 }
-function handlePbChange(db, config, conversationsDir, filename) {
+async function handlePbChange(db, config, conversationsDir, filename) {
   const filePath = join7(conversationsDir, filename);
   const conversationId = basename2(filename, ".pb");
   try {
@@ -4597,7 +5646,7 @@ function handlePbChange(db, config, conversationsDir, filename) {
       console.log(source_default.dim(`[${timestamp2}]`) + source_default.red(` ${conversationId.slice(0, 12)}... deleted`));
       return;
     }
-    const conversation = db.getConversation(conversationId);
+    const conversation = await ensureConversationLoaded(db, config, conversationId);
     if (!conversation) {
       return;
     }
@@ -4629,13 +5678,14 @@ function handlePbChange(db, config, conversationsDir, filename) {
     const timestamp = new Date().toLocaleTimeString();
     const ratio = config.bloatLimit > 0 ? updatedConversation.estimated_tokens / config.bloatLimit : 0;
     const title = updatedConversation.title ? ` ${source_default.dim(`"${updatedConversation.title}"`)}` : "";
-    console.log(source_default.dim(`[${timestamp}]`) + ` ${updatedConversation.id.slice(0, 12)}...${title}` + ` ${deltaBytes >= 0 ? "+" : "-"}${formatBytes(Math.abs(deltaBytes))}` + ` (${snapshot.deltaTokens >= 0 ? "+" : "-"}${formatTokens(Math.abs(snapshot.deltaTokens))} est. tokens)` + ` \u2192 ${formatTokens(updatedConversation.estimated_tokens)} estimated total` + ` (${formatRatio(ratio)} of limit)`);
+    console.log(source_default.dim(`[${timestamp}]`) + ` ${updatedConversation.id.slice(0, 12)}...${title}` + ` ${deltaBytes >= 0 ? "+" : "-"}${formatBytes(Math.abs(deltaBytes))}` + ` (${snapshot.deltaTokens >= 0 ? "+" : "-"}${formatTokens(Math.abs(snapshot.deltaTokens))} est. tokens)` + ` -> ${formatTokens(updatedConversation.estimated_tokens)} estimated total` + ` (${formatRatio(ratio)} of limit)`);
   } catch {}
 }
 var DEBOUNCE_MS = 500;
 var init_file_watcher = __esm(() => {
   init_source();
   init_paths();
+  init_reconcile_helper();
 });
 
 // src/watcher/log-tailer.ts
@@ -4643,25 +5693,45 @@ var exports_log_tailer = {};
 __export(exports_log_tailer, {
   startLogTailer: () => startLogTailer
 });
-import { existsSync as existsSync10, readFileSync as readFileSync7, statSync as statSync4, watchFile } from "fs";
+import { existsSync as existsSync10, readFileSync as readFileSync7, statSync as statSync4 } from "fs";
 function startLogTailer(db, config) {
-  const logFilePath = findLatestLogFile();
-  if (!logFilePath || !existsSync10(logFilePath)) {
-    console.log(source_default.dim("   Log tailer: no Antigravity.log found"));
+  const initialSnapshot = scanLatestLogFile();
+  if (initialSnapshot.logFilePath && existsSync10(initialSnapshot.logFilePath)) {
+    console.log(source_default.dim(`   Tailing: ${initialSnapshot.logFilePath}`));
+  } else {
+    console.log(source_default.dim("   Log tailer: waiting for Antigravity.log..."));
+  }
+  const state = {
+    filePath: initialSnapshot.logFilePath,
+    offset: initialSnapshot.logFilePath && existsSync10(initialSnapshot.logFilePath) ? statSync4(initialSnapshot.logFilePath).size : 0,
+    currentConversationId: initialSnapshot.activeConversationId
+  };
+  const poll = async () => {
+    await refreshLatestLogFile(state);
+    await processNewLines(db, config, state);
+  };
+  const timer = setInterval(() => {
+    poll();
+  }, 1000);
+  poll();
+  process.once("exit", () => clearInterval(timer));
+}
+async function refreshLatestLogFile(state) {
+  const latestPath = findLatestLogFile();
+  if (!latestPath || !existsSync10(latestPath) || latestPath === state.filePath) {
     return;
   }
-  console.log(source_default.dim(`   Tailing: ${logFilePath}`));
-  const state = {
-    filePath: logFilePath,
-    offset: statSync4(logFilePath).size,
-    currentConversationId: null
-  };
-  watchFile(logFilePath, { interval: 1000 }, () => {
-    processNewLines(db, config, state);
-  });
+  const snapshot = scanLatestLogFile();
+  state.filePath = latestPath;
+  state.offset = 0;
+  state.currentConversationId = snapshot.activeConversationId ?? state.currentConversationId;
+  console.log(source_default.dim(`   Tailing: ${latestPath}`));
 }
-function processNewLines(db, config, state) {
+async function processNewLines(db, config, state) {
   try {
+    if (!state.filePath || !existsSync10(state.filePath)) {
+      return;
+    }
     const stats = statSync4(state.filePath);
     if (stats.size < state.offset) {
       state.offset = 0;
@@ -4685,7 +5755,7 @@ function processNewLines(db, config, state) {
       if (parsed.type !== "message_count" || !state.currentConversationId) {
         continue;
       }
-      const conversation = db.getConversation(state.currentConversationId);
+      const conversation = await ensureConversationLoaded(db, config, state.currentConversationId);
       if (!conversation) {
         continue;
       }
@@ -4719,13 +5789,14 @@ function processNewLines(db, config, state) {
       const timestamp = new Date().toLocaleTimeString();
       const deltaLabel = deltaMessages !== null ? ` (+${deltaMessages} since last)` : "";
       const title = updatedConversation.title ? ` ${source_default.dim(`"${updatedConversation.title}"`)}` : "";
-      console.log(source_default.dim(`[${timestamp}]`) + source_default.magenta(" [LIVE]") + ` ${updatedConversation.id.slice(0, 12)}...${title}` + ` now at ${source_default.bold(String(newCount))} direct messages${deltaLabel}` + ` \u2192 ${formatTokens(updatedConversation.estimated_tokens)} estimated tokens` + ` (${formatRatio(ratio)} of limit)`);
+      console.log(source_default.dim(`[${timestamp}]`) + source_default.magenta(" [LIVE]") + ` ${updatedConversation.id.slice(0, 12)}...${title}` + ` now at ${source_default.bold(String(newCount))} direct messages${deltaLabel}` + ` -> ${formatTokens(updatedConversation.estimated_tokens)} estimated tokens` + ` (${formatRatio(ratio)} of limit)`);
     }
   } catch {}
 }
 var init_log_tailer = __esm(() => {
   init_source();
   init_log_signals();
+  init_reconcile_helper();
 });
 
 // node_modules/commander/esm.mjs
@@ -5049,1009 +6120,8 @@ class MonitorDB {
 
 // src/cli/commands/scan.ts
 init_source();
+init_reconciler();
 var import_cli_table3 = __toESM(require_table(), 1);
-
-// src/ingest/storage-json.ts
-init_paths();
-import { readFileSync as readFileSync2, existsSync as existsSync3 } from "fs";
-
-// src/uri-utils.ts
-var WINDOWS_DRIVE_REGEX = /^([a-zA-Z]):[\\/]/;
-var FILE_URI_REGEX = /file:\/\/(?:\/(?:[a-zA-Z]:|[a-zA-Z]%3A)|wsl\.localhost\/)[^\s"'<>)\]}]+/gi;
-function trimDecorators(input) {
-  return input.trim().replace(/^[>\s"'`]+/, "").replace(/[>\s"'`,.;:!?]+$/, "");
-}
-function collapseSlashes(input) {
-  return input.replace(/\/{2,}/g, "/");
-}
-function normalizeWindowsPath(pathValue) {
-  const forward = pathValue.replace(/\\/g, "/");
-  return forward.replace(WINDOWS_DRIVE_REGEX, (_, drive) => `${drive.toLowerCase()}:/`);
-}
-function normalizeFileUriLike(uri) {
-  const cleaned = trimDecorators(uri).replace(/\\/g, "/");
-  if (/^file:\/\/wsl\.localhost\//i.test(cleaned)) {
-    const suffix = cleaned.slice("file://".length);
-    const normalized = collapseSlashes(suffix).replace(/^wsl\.localhost/i, "wsl.localhost");
-    return `file://${normalized}`.replace(/\/$/, "");
-  }
-  if (/^file:\/\/\/[a-zA-Z]:/i.test(cleaned)) {
-    const suffix = cleaned.slice("file:///".length);
-    return `file:///${normalizeWindowsPath(suffix)}`.replace(/\/$/, "");
-  }
-  return cleaned.replace(/\/$/, "");
-}
-function toFileUri(pathValue) {
-  const normalizedPath = normalizeWindowsPath(pathValue);
-  if (WINDOWS_DRIVE_REGEX.test(normalizedPath)) {
-    return `file:///${normalizedPath}`.replace(/\/$/, "");
-  }
-  const unixLike = collapseSlashes(normalizedPath);
-  return `file://${unixLike.startsWith("/") ? "" : "/"}${unixLike}`.replace(/\/$/, "");
-}
-function normalizeWorkspaceUri(uri) {
-  if (!uri)
-    return null;
-  const trimmed = trimDecorators(uri);
-  if (!trimmed)
-    return null;
-  let decoded = trimmed;
-  try {
-    decoded = decodeURIComponent(trimmed);
-  } catch {
-    decoded = trimmed;
-  }
-  if (/^file:\/\//i.test(decoded)) {
-    return normalizeFileUriLike(decoded);
-  }
-  if (WINDOWS_DRIVE_REGEX.test(decoded)) {
-    return toFileUri(decoded);
-  }
-  return collapseSlashes(decoded.replace(/\\/g, "/")).replace(/\/$/, "");
-}
-function extractWorkspaceNameFromUri(uri) {
-  const normalized = normalizeWorkspaceUri(uri) ?? trimDecorators(uri);
-  const withoutScheme = normalized.replace(/^file:\/\/\/?/i, "");
-  const parts = withoutScheme.split("/").filter(Boolean);
-  const last = parts[parts.length - 1] ?? normalized;
-  return last || normalized;
-}
-function findFileUrisInText(text) {
-  const uris = new Set;
-  for (const match of text.matchAll(FILE_URI_REGEX)) {
-    const normalized = normalizeWorkspaceUri(match[0]);
-    if (normalized) {
-      uris.add(normalized);
-    }
-  }
-  return Array.from(uris);
-}
-function isPlaygroundUri(uri) {
-  const normalized = normalizeWorkspaceUri(uri);
-  if (!normalized)
-    return false;
-  return normalized.includes("/.gemini/antigravity/playground/");
-}
-function uriMatchesWorkspaceRoot(candidate, workspaceRoot) {
-  const normalizedCandidate = normalizeWorkspaceUri(candidate);
-  const normalizedRoot = normalizeWorkspaceUri(workspaceRoot);
-  if (!normalizedCandidate || !normalizedRoot) {
-    return false;
-  }
-  return normalizedCandidate === normalizedRoot || normalizedCandidate.startsWith(`${normalizedRoot}/`);
-}
-
-// src/ingest/storage-json.ts
-function parseStorageJson(customPath) {
-  const storagePath = customPath || getStorageJsonPath();
-  if (!existsSync3(storagePath)) {
-    console.warn(`\u26A0\uFE0F  storage.json not found at: ${storagePath}`);
-    return null;
-  }
-  let raw;
-  try {
-    const content = readFileSync2(storagePath, "utf-8");
-    raw = JSON.parse(content);
-  } catch (err) {
-    console.error(`\u274C Failed to parse storage.json:`, err);
-    return null;
-  }
-  const workspaces = [];
-  const profileAssociations = raw["profileAssociations"];
-  if (profileAssociations && typeof profileAssociations === "object") {
-    const wsMap = profileAssociations["workspaces"];
-    if (wsMap && typeof wsMap === "object") {
-      for (const [uri, profileId] of Object.entries(wsMap)) {
-        const hash = generateWorkspaceHash(uri);
-        const normalizedUri = normalizeWorkspaceUri(uri);
-        if (!normalizedUri)
-          continue;
-        workspaces.push({
-          hash,
-          uri,
-          normalizedUri,
-          name: extractWorkspaceNameFromUri(uri)
-        });
-      }
-    }
-  }
-  const sidebarWorkspaces = [];
-  const unifiedState = raw["antigravityUnifiedStateSync"];
-  if (unifiedState && typeof unifiedState === "object") {
-    const sidebar = unifiedState["sidebarWorkspaces"];
-    if (Array.isArray(sidebar)) {
-      for (const entry of sidebar) {
-        if (entry && typeof entry === "object" && "uri" in entry) {
-          sidebarWorkspaces.push({
-            uri: String(entry.uri),
-            name: extractWorkspaceNameFromUri(String(entry.uri)),
-            isActive: Boolean(entry.isActive)
-          });
-        }
-      }
-    } else if (typeof sidebar === "string") {
-      try {
-        const parsed = JSON.parse(sidebar);
-        if (Array.isArray(parsed)) {
-          for (const entry of parsed) {
-            if (entry && typeof entry === "object" && "uri" in entry) {
-              sidebarWorkspaces.push({
-                uri: String(entry.uri),
-                name: extractWorkspaceNameFromUri(String(entry.uri)),
-                isActive: Boolean(entry.isActive)
-              });
-            }
-          }
-        }
-      } catch {}
-    }
-  }
-  const scratchWorkspaces = [];
-  if (unifiedState && typeof unifiedState === "object") {
-    const scratch = unifiedState["scratchWorkspaces"];
-    if (Array.isArray(scratch)) {
-      for (const entry of scratch) {
-        if (entry && typeof entry === "object" && "uri" in entry) {
-          scratchWorkspaces.push({
-            uri: String(entry.uri),
-            name: extractWorkspaceNameFromUri(String(entry.uri))
-          });
-        }
-      }
-    } else if (typeof scratch === "string") {
-      try {
-        const parsed = JSON.parse(scratch);
-        if (Array.isArray(parsed)) {
-          for (const entry of parsed) {
-            if (entry && typeof entry === "object" && "uri" in entry) {
-              scratchWorkspaces.push({
-                uri: String(entry.uri),
-                name: extractWorkspaceNameFromUri(String(entry.uri))
-              });
-            }
-          }
-        }
-      } catch {}
-    }
-  }
-  return { workspaces, sidebarWorkspaces, scratchWorkspaces, raw };
-}
-function generateWorkspaceHash(uri) {
-  const hasher = new Bun.CryptoHasher("md5");
-  hasher.update(uri);
-  return hasher.digest("hex");
-}
-
-// src/ingest/state-vscdb.ts
-init_paths();
-import { Database as Database2 } from "bun:sqlite";
-import { existsSync as existsSync4 } from "fs";
-var UUID_REGEX = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/ig;
-var BASE64_REGEX = /(?:[A-Za-z0-9+/]{24,}={0,2})/g;
-var TITLE_REGEX = /([A-Z][A-Za-z0-9&/()'.,:_-]*(?: [A-Za-z0-9&/()'.,:_-]+){1,12})/;
-function readItemTableRawValue(db, key) {
-  try {
-    const row = db.query("SELECT value FROM ItemTable WHERE key = ?1").get(key);
-    if (!row)
-      return null;
-    if (typeof row.value === "string")
-      return row.value;
-    if (Buffer.isBuffer(row.value))
-      return row.value.toString("utf-8");
-    if (row.value instanceof Uint8Array)
-      return new TextDecoder().decode(row.value);
-    return null;
-  } catch {
-    return null;
-  }
-}
-function tryParseJson(raw) {
-  try {
-    return JSON.parse(raw);
-  } catch {
-    return null;
-  }
-}
-function isLikelyBase64(raw) {
-  const trimmed = raw.trim();
-  return trimmed.length >= 16 && trimmed.length % 4 === 0 && /^[A-Za-z0-9+/=\r\n]+$/.test(trimmed);
-}
-function toPrintableText(input) {
-  return input.replace(/[^\x20-\x7E\r\n\t]+/g, " ");
-}
-function decodeBase64Printable(candidate) {
-  return toPrintableText(Buffer.from(candidate, "base64").toString("utf-8")).trim();
-}
-function scoreDecodedText(text) {
-  let score = 0;
-  score += (text.match(/file:\/\/\/|https?:\/\//g) ?? []).length * 20;
-  score += (text.match(/[A-Za-z]{4,}/g) ?? []).length;
-  if (/\{\".+/.test(text))
-    score += 10;
-  return score;
-}
-function sanitizeTitle(title) {
-  return title.replace(/^[^A-Za-z0-9]+/, "").replace(/\s+\$?$/, "").replace(/\s+[A-Za-z]$/, "").replace(/\s{2,}/g, " ").trim();
-}
-function isUsableTitle(title) {
-  if (title.length < 6)
-    return false;
-  if (UUID_REGEX.test(title))
-    return false;
-  UUID_REGEX.lastIndex = 0;
-  if (/notify_user/i.test(title))
-    return false;
-  if (/^(mainR|masterR)/i.test(title))
-    return false;
-  if (/tokens truncated/i.test(title))
-    return false;
-  if (/[{}]/.test(title))
-    return false;
-  const words = title.match(/[A-Za-z]{3,}/g) ?? [];
-  return words.length >= 2;
-}
-function decodeNestedPayloads(segment) {
-  const decoded = [];
-  const seen = new Set;
-  for (const match of segment.matchAll(BASE64_REGEX)) {
-    const candidate = match[0];
-    if (candidate.length < 24 || candidate.length > 16000)
-      continue;
-    try {
-      const variants = [candidate];
-      if (candidate.length > 25) {
-        variants.push(candidate.slice(1));
-      }
-      let printable = "";
-      let bestScore = -1;
-      for (const variant of variants) {
-        const decoded2 = decodeBase64Printable(variant);
-        const score = scoreDecodedText(decoded2);
-        if (score > bestScore) {
-          printable = decoded2;
-          bestScore = score;
-        }
-      }
-      if (!printable || printable.length < 8)
-        continue;
-      if (!/(file:\/\/\/|https?:\/\/|[A-Za-z]{4,} [A-Za-z]{4,}|\{\".+)/.test(printable))
-        continue;
-      if (seen.has(printable))
-        continue;
-      seen.add(printable);
-      decoded.push(printable);
-    } catch {
-      continue;
-    }
-  }
-  return decoded;
-}
-function extractTitle(segment, nestedPayloads, conversationId) {
-  const sources = [...nestedPayloads, toPrintableText(segment)];
-  for (const source of sources) {
-    const prefix = source.split(conversationId)[0] ?? source;
-    const quoteMatch = prefix.match(/"([^"]{6,120})"/);
-    if (quoteMatch) {
-      const title = sanitizeTitle(quoteMatch[1]);
-      if (isUsableTitle(title) && !/^(file:\/\/|https?:\/\/)/i.test(title)) {
-        return title;
-      }
-    }
-    const titleMatch = prefix.match(TITLE_REGEX);
-    if (titleMatch) {
-      const title = sanitizeTitle(titleMatch[1]);
-      if (isUsableTitle(title) && !/^(file:\/\/|https?:\/\/)/i.test(title)) {
-        return title;
-      }
-    }
-  }
-  return;
-}
-function extractMessageCount(text) {
-  const directMatch = text.match(/(?:messageCount|chat messages?)["\s:=-]+(\d{1,5})/i);
-  if (directMatch) {
-    return parseInt(directMatch[1], 10);
-  }
-  return;
-}
-function decodeStateValue(raw) {
-  const parsedJson = tryParseJson(raw);
-  if (parsedJson !== null) {
-    return {
-      raw,
-      parsedJson,
-      decodedText: raw,
-      base64Decoded: false
-    };
-  }
-  if (isLikelyBase64(raw)) {
-    try {
-      return {
-        raw,
-        parsedJson: null,
-        decodedText: Buffer.from(raw, "base64").toString("utf-8"),
-        base64Decoded: true
-      };
-    } catch {}
-  }
-  return {
-    raw,
-    parsedJson: null,
-    decodedText: raw,
-    base64Decoded: false
-  };
-}
-function extractTrajectoriesFromJson(value) {
-  const entries = Array.isArray(value) ? value : typeof value === "object" && value !== null ? Object.entries(value).map(([key, entry]) => ({
-    conversationId: key,
-    ...typeof entry === "object" && entry !== null ? entry : {}
-  })) : [];
-  const results = [];
-  for (const entry of entries) {
-    if (!entry || typeof entry !== "object")
-      continue;
-    const record = entry;
-    const conversationId = String(record.conversationId || record.id || "");
-    if (!conversationId)
-      continue;
-    const workspaceUri = normalizeWorkspaceUri(typeof record.workspaceUri === "string" ? record.workspaceUri : undefined);
-    results.push({
-      conversationId,
-      title: typeof record.title === "string" ? record.title : undefined,
-      messageCount: typeof record.messageCount === "number" ? record.messageCount : undefined,
-      lastActivity: typeof record.lastActivity === "string" ? record.lastActivity : undefined,
-      workspaceUri: workspaceUri ?? undefined,
-      workspaceUris: workspaceUri ? [workspaceUri] : [],
-      rawSnippet: undefined
-    });
-  }
-  return results;
-}
-function extractTrajectorySummariesFromEncodedText(text) {
-  const matches = Array.from(text.matchAll(UUID_REGEX));
-  const results = [];
-  for (let index = 0;index < matches.length; index++) {
-    const current = matches[index];
-    const conversationId = current[0];
-    const currentIndex = current.index ?? 0;
-    const nextIndex = matches[index + 1]?.index ?? text.length;
-    const previousBoundary = matches[index - 1] ? (matches[index - 1].index ?? 0) + matches[index - 1][0].length : 0;
-    const start = Math.max(previousBoundary, currentIndex - 160);
-    const end = Math.min(nextIndex, currentIndex + 4000);
-    const segment = text.slice(start, end);
-    const nestedPayloads = decodeNestedPayloads(segment);
-    const combinedText = [toPrintableText(segment), ...nestedPayloads].join(`
-`);
-    const workspaceUris = findFileUrisInText(combinedText);
-    const usefulWorkspaceUris = workspaceUris.filter((uri) => !uri.includes("/.gemini/antigravity/brain/"));
-    const workspaceUri = usefulWorkspaceUris[0] ?? workspaceUris[0];
-    const title = extractTitle(segment, nestedPayloads, conversationId);
-    const messageCount = extractMessageCount(combinedText);
-    results.push({
-      conversationId,
-      title,
-      messageCount,
-      workspaceUri,
-      workspaceUris: usefulWorkspaceUris.length > 0 ? usefulWorkspaceUris : workspaceUris,
-      rawSnippet: combinedText.slice(0, 800)
-    });
-  }
-  return results;
-}
-function extractChatSessions(value) {
-  if (!value || typeof value !== "object") {
-    return [];
-  }
-  const root = value;
-  const rawEntries = Array.isArray(root.entries) ? root.entries : root.entries && typeof root.entries === "object" ? Object.values(root.entries) : Array.isArray(value) ? value : Object.values(root);
-  const sessions = [];
-  for (const entry of rawEntries) {
-    if (!entry || typeof entry !== "object")
-      continue;
-    const record = entry;
-    const sessionId = String(record.sessionId || record.id || "");
-    if (!sessionId)
-      continue;
-    const workspaceUri = normalizeWorkspaceUri(typeof record.workspaceUri === "string" ? record.workspaceUri : typeof record.workspaceFolder === "string" ? record.workspaceFolder : typeof record.folder === "string" ? record.folder : undefined);
-    sessions.push({
-      sessionId,
-      workspaceUri: workspaceUri ?? undefined,
-      title: typeof record.title === "string" ? record.title : undefined,
-      lastModified: typeof record.lastModified === "string" ? record.lastModified : typeof record.updatedAt === "string" ? record.updatedAt : undefined
-    });
-  }
-  return sessions;
-}
-function decodeObjectLikeValue(raw) {
-  const decoded = decodeStateValue(raw);
-  if (decoded.parsedJson && typeof decoded.parsedJson === "object") {
-    return decoded.parsedJson;
-  }
-  const printable = toPrintableText(decoded.decodedText).trim();
-  return printable || null;
-}
-function parseStateVscdb(customPath) {
-  const dbPath = customPath || getGlobalStateDbPath();
-  if (!existsSync4(dbPath)) {
-    console.warn(`\u26A0\uFE0F  state.vscdb not found at: ${dbPath}`);
-    return null;
-  }
-  let db;
-  try {
-    db = new Database2(dbPath, { readonly: true });
-  } catch (err) {
-    console.error("\u274C Failed to open state.vscdb:", err);
-    return null;
-  }
-  try {
-    const sessionToWorkspace = new Map;
-    const chatIndexRaw = readItemTableRawValue(db, "chat.ChatSessionStore.index");
-    const chatSessions = chatIndexRaw ? extractChatSessions(decodeStateValue(chatIndexRaw).parsedJson) : [];
-    for (const session of chatSessions) {
-      if (session.workspaceUri) {
-        sessionToWorkspace.set(session.sessionId, session.workspaceUri);
-      }
-    }
-    const trajectoriesRaw = readItemTableRawValue(db, "antigravityUnifiedStateSync.trajectorySummaries");
-    let trajectories = [];
-    if (trajectoriesRaw) {
-      const decoded = decodeStateValue(trajectoriesRaw);
-      trajectories = decoded.parsedJson !== null ? extractTrajectoriesFromJson(decoded.parsedJson) : extractTrajectorySummariesFromEncodedText(decoded.decodedText);
-    }
-    for (const trajectory of trajectories) {
-      if (trajectory.workspaceUri) {
-        sessionToWorkspace.set(trajectory.conversationId, trajectory.workspaceUri);
-      }
-    }
-    const creditsRaw = readItemTableRawValue(db, "antigravityUnifiedStateSync.modelCredits");
-    const creditsValue = creditsRaw ? decodeObjectLikeValue(creditsRaw) : null;
-    let modelCredits = null;
-    if (creditsValue && typeof creditsValue === "object") {
-      const record = creditsValue;
-      modelCredits = {
-        used: typeof record.used === "number" ? record.used : 0,
-        total: typeof record.total === "number" ? record.total : 0,
-        resetDate: typeof record.resetDate === "string" ? record.resetDate : undefined,
-        raw: creditsValue
-      };
-    } else if (creditsValue) {
-      modelCredits = {
-        used: 0,
-        total: 0,
-        raw: creditsValue
-      };
-    }
-    const modelPreferencesRaw = readItemTableRawValue(db, "antigravityUnifiedStateSync.modelPreferences");
-    const modelPreferences = modelPreferencesRaw ? decodeObjectLikeValue(modelPreferencesRaw) : null;
-    return {
-      chatSessions,
-      trajectories,
-      modelCredits,
-      modelPreferences,
-      sessionToWorkspace
-    };
-  } finally {
-    db.close();
-  }
-}
-
-// src/ingest/workspace-storage.ts
-init_paths();
-import { readdirSync, readFileSync as readFileSync3, existsSync as existsSync5 } from "fs";
-import { join as join3 } from "path";
-function scanWorkspaceStorage(customPath) {
-  const storageDir = customPath || getWorkspaceStorageDir();
-  if (!existsSync5(storageDir)) {
-    console.warn(`\u26A0\uFE0F  workspaceStorage directory not found at: ${storageDir}`);
-    return [];
-  }
-  const entries = [];
-  try {
-    const hashDirs = readdirSync(storageDir, { withFileTypes: true });
-    for (const dir of hashDirs) {
-      if (!dir.isDirectory())
-        continue;
-      const wsJsonPath = join3(storageDir, dir.name, "workspace.json");
-      if (!existsSync5(wsJsonPath))
-        continue;
-      try {
-        const content = readFileSync3(wsJsonPath, "utf-8");
-        const parsed = JSON.parse(content);
-        const uri = parsed.folder || parsed.workspace || parsed.uri || "";
-        if (uri) {
-          const normalizedUri = normalizeWorkspaceUri(String(uri));
-          if (!normalizedUri)
-            continue;
-          entries.push({
-            hash: dir.name,
-            uri: String(uri),
-            normalizedUri,
-            name: extractWorkspaceNameFromUri(String(uri))
-          });
-        }
-      } catch {}
-    }
-  } catch (err) {
-    console.error(`\u274C Failed to scan workspaceStorage:`, err);
-  }
-  return entries;
-}
-
-// src/scanner/conversation-scanner.ts
-init_paths();
-import { readdirSync as readdirSync2, statSync, readFileSync as readFileSync4, existsSync as existsSync6 } from "fs";
-import { join as join4, basename, extname } from "path";
-function scanConversations(customPath) {
-  const convDir = customPath || getConversationsDir();
-  if (!existsSync6(convDir)) {
-    console.warn(`\u26A0\uFE0F  conversations directory not found at: ${convDir}`);
-    return [];
-  }
-  const entries = [];
-  try {
-    const files = readdirSync2(convDir);
-    for (const file of files) {
-      if (extname(file) !== ".pb")
-        continue;
-      const filePath = join4(convDir, file);
-      const id = basename(file, ".pb");
-      try {
-        const stats = statSync(filePath);
-        const annotation = readAnnotation(id);
-        entries.push({
-          id,
-          pbFilePath: filePath,
-          pbFileBytes: stats.size,
-          createdAt: stats.birthtime,
-          lastModified: stats.mtime,
-          annotationTimestamp: annotation?.lastUserViewTime ?? null
-        });
-      } catch {}
-    }
-  } catch (err) {
-    console.error(`\u274C Failed to scan conversations:`, err);
-  }
-  return entries.sort((a, b) => b.pbFileBytes - a.pbFileBytes);
-}
-function readAnnotation(conversationId, customDir) {
-  const annDir = customDir || getAnnotationsDir();
-  const annPath = join4(annDir, `${conversationId}.pbtxt`);
-  if (!existsSync6(annPath))
-    return null;
-  try {
-    const content = readFileSync4(annPath, "utf-8");
-    let lastUserViewTime = null;
-    const nestedSeconds = content.match(/last_user_view_time\s*:\s*\{\s*seconds\s*:\s*(\d+)/);
-    const flatValue = content.match(/last_user_view_time\s*:\s*(\d+)/);
-    if (nestedSeconds) {
-      lastUserViewTime = parseInt(nestedSeconds[1], 10) * 1000;
-    } else if (flatValue) {
-      lastUserViewTime = parseInt(flatValue[1], 10) * 1000;
-    }
-    return {
-      conversationId,
-      lastUserViewTime,
-      rawContent: content
-    };
-  } catch {
-    return null;
-  }
-}
-
-// src/scanner/brain-scanner.ts
-init_paths();
-import { readdirSync as readdirSync3, statSync as statSync2, readFileSync as readFileSync5, existsSync as existsSync7 } from "fs";
-import { join as join5 } from "path";
-function dirStats(dirPath) {
-  let totalBytes = 0;
-  let fileCount = 0;
-  try {
-    const entries = readdirSync3(dirPath, { withFileTypes: true });
-    for (const entry of entries) {
-      const fullPath = join5(dirPath, entry.name);
-      if (entry.isDirectory()) {
-        const sub = dirStats(fullPath);
-        totalBytes += sub.totalBytes;
-        fileCount += sub.fileCount;
-      } else if (entry.isFile()) {
-        try {
-          totalBytes += statSync2(fullPath).size;
-          fileCount++;
-        } catch {}
-      }
-    }
-  } catch {}
-  return { totalBytes, fileCount };
-}
-function countResolvedVersions(dirPath) {
-  let count = 0;
-  try {
-    const entries = readdirSync3(dirPath, { withFileTypes: true });
-    for (const entry of entries) {
-      if (entry.isFile() && /\.resolved\.\d+$/.test(entry.name)) {
-        count++;
-      }
-      if (entry.isDirectory()) {
-        count += countResolvedVersions(join5(dirPath, entry.name));
-      }
-    }
-  } catch {}
-  return count;
-}
-function countArtifacts(dirPath) {
-  let count = 0;
-  try {
-    const entries = readdirSync3(dirPath, { withFileTypes: true });
-    for (const entry of entries) {
-      if (entry.isDirectory()) {
-        count += countArtifacts(join5(dirPath, entry.name));
-      } else if (entry.isFile()) {
-        if (!entry.name.endsWith(".metadata.json") && !/\.resolved\.\d+$/.test(entry.name) && entry.name !== "overview.txt") {
-          count++;
-        }
-      }
-    }
-  } catch {}
-  return count;
-}
-function extractWorkspaceUris(dirPath) {
-  const uris = new Set;
-  try {
-    const entries = readdirSync3(dirPath, { withFileTypes: true });
-    for (const entry of entries) {
-      const fullPath = join5(dirPath, entry.name);
-      if (entry.isDirectory()) {
-        for (const uri of extractWorkspaceUris(fullPath)) {
-          uris.add(uri);
-        }
-      } else if (entry.isFile() && (entry.name.endsWith(".md") || entry.name.endsWith(".txt"))) {
-        try {
-          const content = readFileSync5(fullPath, "utf-8");
-          for (const uri of findFileUrisInText(content)) {
-            uris.add(uri);
-          }
-        } catch {}
-      }
-    }
-  } catch {}
-  return Array.from(uris);
-}
-function extractBrainTitle(dirPath) {
-  const preferredFiles = [
-    "task.md",
-    "walkthrough.md",
-    "overview.txt",
-    "task.md.metadata.json",
-    "walkthrough.md.metadata.json"
-  ];
-  for (const fileName of preferredFiles) {
-    const filePath = join5(dirPath, fileName);
-    if (!existsSync7(filePath))
-      continue;
-    try {
-      const content = readFileSync5(filePath, "utf-8");
-      const headingMatch = content.match(/^#\s+(.+)$/m);
-      if (headingMatch?.[1]) {
-        return headingMatch[1].trim();
-      }
-      if (fileName.endsWith(".json")) {
-        const parsed = JSON.parse(content);
-        if (typeof parsed.summary === "string" && parsed.summary.trim().length >= 6) {
-          return parsed.summary.trim();
-        }
-      }
-    } catch {
-      continue;
-    }
-  }
-  return;
-}
-function scanBrainFolders(customPath) {
-  const brainDir = customPath || getBrainDir();
-  if (!existsSync7(brainDir)) {
-    console.warn(`\u26A0\uFE0F  brain directory not found at: ${brainDir}`);
-    return [];
-  }
-  const entries = [];
-  try {
-    const dirs = readdirSync3(brainDir, { withFileTypes: true });
-    for (const dir of dirs) {
-      if (!dir.isDirectory())
-        continue;
-      const name = dir.name;
-      if (name.startsWith("."))
-        continue;
-      const brainPath = join5(brainDir, name);
-      const stats = dirStats(brainPath);
-      const resolvedCount = countResolvedVersions(brainPath);
-      const artifactCount = countArtifacts(brainPath);
-      const workspaceUris = extractWorkspaceUris(brainPath);
-      entries.push({
-        conversationId: name,
-        totalBytes: stats.totalBytes,
-        fileCount: stats.fileCount,
-        artifactCount,
-        resolvedVersionCount: resolvedCount,
-        workspaceUris,
-        title: extractBrainTitle(brainPath),
-        brainPath
-      });
-    }
-  } catch (err) {
-    console.error(`\u274C Failed to scan brain folders:`, err);
-  }
-  return entries.sort((a, b) => b.totalBytes - a.totalBytes);
-}
-
-// src/ingest/reconciler.ts
-init_log_signals();
-var UNMAPPED_WORKSPACE_ID = "__unmapped__";
-var UNMAPPED_WORKSPACE_URI = "__unmapped__";
-function toIsoString(timestamp) {
-  const date = new Date(timestamp.replace(" ", "T"));
-  return Number.isNaN(date.getTime()) ? null : date.toISOString();
-}
-function buildWorkspaceRegistry(storageWorkspaces, workspaceStorageEntries) {
-  const registry = new Map;
-  const addWorkspace = (entry) => {
-    if (!entry.normalizedUri)
-      return;
-    if (registry.has(entry.normalizedUri))
-      return;
-    registry.set(entry.normalizedUri, {
-      id: entry.hash,
-      uri: entry.uri,
-      normalizedUri: entry.normalizedUri,
-      name: entry.name || extractWorkspaceNameFromUri(entry.uri)
-    });
-  };
-  for (const workspace of storageWorkspaces) {
-    addWorkspace(workspace);
-  }
-  for (const workspace of workspaceStorageEntries) {
-    addWorkspace(workspace);
-  }
-  registry.set(UNMAPPED_WORKSPACE_URI, {
-    id: UNMAPPED_WORKSPACE_ID,
-    uri: UNMAPPED_WORKSPACE_URI,
-    normalizedUri: UNMAPPED_WORKSPACE_URI,
-    name: "[Unmapped]"
-  });
-  return registry;
-}
-function findWorkspaceMatch(candidateUris, registry, sourcePrefix, exactConfidence, prefixConfidence) {
-  for (const candidate of candidateUris) {
-    const normalizedCandidate = normalizeWorkspaceUri(candidate);
-    if (!normalizedCandidate)
-      continue;
-    const exact = registry.get(normalizedCandidate);
-    if (exact && exact.id !== UNMAPPED_WORKSPACE_ID) {
-      return {
-        workspaceId: exact.id,
-        workspaceUri: exact.uri,
-        mappingSource: `${sourcePrefix}_exact`,
-        mappingConfidence: exactConfidence,
-        mappingNotes: `Matched normalized workspace URI from ${sourcePrefix}.`
-      };
-    }
-    for (const workspace of registry.values()) {
-      if (workspace.id === UNMAPPED_WORKSPACE_ID)
-        continue;
-      if (uriMatchesWorkspaceRoot(normalizedCandidate, workspace.normalizedUri)) {
-        return {
-          workspaceId: workspace.id,
-          workspaceUri: workspace.uri,
-          mappingSource: `${sourcePrefix}_prefix`,
-          mappingConfidence: prefixConfidence,
-          mappingNotes: `Matched a file URI beneath the workspace root from ${sourcePrefix}.`
-        };
-      }
-    }
-  }
-  return null;
-}
-function findWorkspaceByTitleHint(titleCandidates, registry) {
-  const matches = new Map;
-  for (const rawTitle of titleCandidates) {
-    const title = rawTitle?.trim();
-    if (!title)
-      continue;
-    const normalizedTitle = title.toLowerCase();
-    for (const workspace2 of registry.values()) {
-      if (workspace2.id === UNMAPPED_WORKSPACE_ID)
-        continue;
-      const name = workspace2.name.trim();
-      if (name.length < 4)
-        continue;
-      if (normalizedTitle.includes(name.toLowerCase())) {
-        matches.set(workspace2.id, workspace2);
-      }
-    }
-  }
-  if (matches.size !== 1) {
-    return null;
-  }
-  const workspace = Array.from(matches.values())[0];
-  return {
-    workspaceId: workspace.id,
-    workspaceUri: workspace.uri,
-    mappingSource: "title_hint",
-    mappingConfidence: 0.55,
-    mappingNotes: "Matched the workspace name from conversation or brain-title text because no URI signal was available."
-  };
-}
-function buildUnmappedReason(trajectory, brain) {
-  const stateUriCount = trajectory?.workspaceUris.length ?? 0;
-  const brainUriCount = brain?.workspaceUris.length ?? 0;
-  const titleHints = [trajectory?.title, brain?.title].filter((value) => Boolean(value?.trim()));
-  if (stateUriCount === 0 && brainUriCount === 0 && titleHints.length === 0) {
-    return "No workspace URI, brain URI, or usable title hint was found.";
-  }
-  const parts = [];
-  if (stateUriCount > 0) {
-    parts.push(`state.vscdb exposed ${stateUriCount} workspace URI${stateUriCount > 1 ? "s" : ""} but none matched a known workspace`);
-  }
-  if (brainUriCount > 0) {
-    parts.push(`brain artifacts exposed ${brainUriCount} workspace URI${brainUriCount > 1 ? "s" : ""} but none matched a known workspace`);
-  }
-  if (titleHints.length > 0) {
-    parts.push(`title hints (${titleHints.map((title) => `"${title}"`).join(", ")}) did not uniquely identify a workspace`);
-  }
-  return `${parts.join("; ")}.`;
-}
-function chooseLastActive(conversationId, annotationTimestamp, lastModified, logSignals) {
-  const logTimestamp = logSignals.lastActivityAt.get(conversationId);
-  if (logTimestamp) {
-    const iso = toIsoString(logTimestamp);
-    if (iso) {
-      return { lastActiveAt: iso, activitySource: "log" };
-    }
-  }
-  if (annotationTimestamp) {
-    return {
-      lastActiveAt: new Date(annotationTimestamp).toISOString(),
-      activitySource: "annotation"
-    };
-  }
-  return {
-    lastActiveAt: lastModified.toISOString(),
-    activitySource: "filesystem"
-  };
-}
-function indexTrajectories(trajectories) {
-  const map = new Map;
-  for (const trajectory of trajectories) {
-    map.set(trajectory.conversationId, trajectory);
-  }
-  return map;
-}
-async function reconcile(db, config) {
-  const stats = {
-    workspacesFound: 0,
-    conversationsTotal: 0,
-    conversationsMapped: 0,
-    conversationsUnmapped: 0,
-    brainFoldersFound: 0,
-    orphanBrainFolders: 0,
-    orphanAnnotations: 0,
-    totalPbBytes: 0,
-    totalBrainBytes: 0
-  };
-  const storageResult = parseStorageJson();
-  const workspaceStorageEntries = scanWorkspaceStorage();
-  const workspaceRegistry = buildWorkspaceRegistry(storageResult?.workspaces ?? [], workspaceStorageEntries);
-  const stateResult = parseStateVscdb();
-  const trajectoryByConversation = indexTrajectories(stateResult?.trajectories ?? []);
-  const logSignals = scanLatestLogFile();
-  const conversations = scanConversations();
-  const brainEntries = scanBrainFolders();
-  const brainByConversation = new Map;
-  for (const brainEntry of brainEntries) {
-    brainByConversation.set(brainEntry.conversationId, brainEntry);
-  }
-  const now = new Date().toISOString();
-  for (const workspace of workspaceRegistry.values()) {
-    db.upsertWorkspace({
-      id: workspace.id,
-      uri: workspace.uri,
-      name: workspace.name,
-      last_seen: now
-    });
-  }
-  stats.workspacesFound = workspaceRegistry.size;
-  const scannedConversationIds = [];
-  const activeConversationId = logSignals.activeConversationId;
-  for (const conversationEntry of conversations) {
-    scannedConversationIds.push(conversationEntry.id);
-    const brain = brainByConversation.get(conversationEntry.id);
-    const trajectory = trajectoryByConversation.get(conversationEntry.id);
-    const stateUris = trajectory?.workspaceUris ?? (trajectory?.workspaceUri ? [trajectory.workspaceUri] : []);
-    const brainUris = brain?.workspaceUris ?? [];
-    const mapping = findWorkspaceMatch(stateUris, workspaceRegistry, "state_vscdb", 1, 0.92) ?? findWorkspaceMatch(brainUris, workspaceRegistry, "brain_artifact", 0.8, 0.72) ?? findWorkspaceByTitleHint([trajectory?.title, brain?.title], workspaceRegistry) ?? {
-      workspaceId: UNMAPPED_WORKSPACE_ID,
-      workspaceUri: UNMAPPED_WORKSPACE_URI,
-      mappingSource: "unmapped",
-      mappingConfidence: 0,
-      mappingNotes: buildUnmappedReason(trajectory, brain)
-    };
-    if (mapping.workspaceId === UNMAPPED_WORKSPACE_ID) {
-      stats.conversationsUnmapped++;
-    } else {
-      stats.conversationsMapped++;
-    }
-    const directMessageCount = logSignals.messageCounts.get(conversationEntry.id);
-    const messageCount = directMessageCount ?? trajectory?.messageCount ?? null;
-    const messageCountSource = directMessageCount !== undefined ? "log" : trajectory?.messageCount !== undefined ? "state_vscdb" : null;
-    const activity = chooseLastActive(conversationEntry.id, conversationEntry.annotationTimestamp, conversationEntry.lastModified, logSignals);
-    const metrics = estimateConversationMetrics({
-      pbFileBytes: conversationEntry.pbFileBytes,
-      brainFolderBytes: brain?.totalBytes ?? 0,
-      messageCount,
-      resolvedVersionCount: brain?.resolvedVersionCount ?? 0,
-      bytesPerToken: config.bytesPerToken
-    });
-    const canonicalConversation = {
-      id: conversationEntry.id,
-      workspace_id: mapping.workspaceId,
-      title: trajectory?.title ?? brain?.title ?? null,
-      pb_file_bytes: conversationEntry.pbFileBytes,
-      brain_folder_bytes: brain?.totalBytes ?? 0,
-      brain_artifact_count: brain?.artifactCount ?? 0,
-      resolved_version_count: brain?.resolvedVersionCount ?? 0,
-      message_count: messageCount,
-      message_count_source: messageCountSource,
-      estimated_prompt_tokens: metrics.estimatedPromptTokens,
-      estimated_artifact_tokens: metrics.estimatedArtifactTokens,
-      estimated_tokens: metrics.estimatedTotalTokens,
-      annotation_timestamp: conversationEntry.annotationTimestamp,
-      created_at: conversationEntry.createdAt.toISOString(),
-      last_modified: conversationEntry.lastModified.toISOString(),
-      last_active_at: activity.lastActiveAt,
-      activity_source: activity.activitySource,
-      mapping_source: mapping.mappingSource,
-      mapping_confidence: mapping.mappingConfidence,
-      mapping_notes: mapping.mappingNotes,
-      is_active: activeConversationId === conversationEntry.id ? 1 : 0
-    };
-    db.upsertConversation(canonicalConversation);
-    takeSnapshotIfChanged(db, canonicalConversation);
-    stats.totalPbBytes += canonicalConversation.pb_file_bytes;
-    stats.totalBrainBytes += canonicalConversation.brain_folder_bytes;
-  }
-  db.deleteConversationsNotIn(scannedConversationIds);
-  for (const workspace of workspaceRegistry.values()) {
-    db.updateWorkspaceAggregates(workspace.id);
-  }
-  const scannedConversationIdSet = new Set(scannedConversationIds);
-  for (const brainEntry of brainEntries) {
-    if (!scannedConversationIdSet.has(brainEntry.conversationId)) {
-      stats.orphanBrainFolders++;
-    }
-  }
-  stats.conversationsTotal = conversations.length;
-  stats.brainFoldersFound = brainEntries.length;
-  return stats;
-}
 // src/metrics/health.ts
 function assessHealth(estimatedTokens, bloatLimit) {
   const ratio = estimatedTokens / bloatLimit;
@@ -6085,7 +6155,9 @@ function assessWorkspaceHealth(conversationTokens, bloatLimit) {
   const worstConversation = Math.max(...conversationTokens);
   return assessHealth(worstConversation, bloatLimit);
 }
+
 // src/view-models.ts
+init_uri_utils();
 function relativeTime(dateValue) {
   if (!dateValue)
     return "unknown";
@@ -6281,12 +6353,12 @@ function registerScanCommand(program2, db, config) {
     }
     if (watchMode) {
       console.log(source_default.yellow("Watch mode - press Ctrl+C to exit"));
+      console.log(source_default.dim("   Live watch focuses on the current conversation only."));
+      console.log(source_default.dim("   Run `agk scan` when you want the full workspace history and cleanup summary."));
       console.log();
       displayCurrentConversation(db, config, false);
       console.log();
-      displayWorkspaceSummary(db, config, false);
-      console.log();
-      console.log(source_default.dim("   Monitoring live session growth..."));
+      console.log(source_default.dim("   Waiting for .pb changes and Antigravity runtime signals..."));
       const { startFileWatcher: startFileWatcher2 } = await Promise.resolve().then(() => (init_file_watcher(), exports_file_watcher));
       const { startLogTailer: startLogTailer2 } = await Promise.resolve().then(() => (init_log_tailer(), exports_log_tailer));
       startFileWatcher2(db, config);
@@ -6518,10 +6590,11 @@ function truncate(value, maxLength) {
 
 // src/cli/commands/report.ts
 init_source();
+init_reconciler();
+init_paths();
 var import_cli_table32 = __toESM(require_table(), 1);
 import { basename as basename3 } from "path";
 import { existsSync as existsSync11, readdirSync as readdirSync5 } from "fs";
-init_paths();
 function registerReportCommand(program2, db, config) {
   program2.command("report").description("Generate a cache health report with cleanup targets").option("--json", "Output raw JSON").action(async (options) => {
     const useJson = options.json || program2.opts().json;
@@ -6854,6 +6927,7 @@ function getDirSize(dirPath) {
 
 // src/server/index.ts
 init_source();
+init_reconciler();
 function registerServeCommand(program2, db, config) {
   program2.command("serve").description("Start a JSON API server on localhost").option("-p, --port <number>", "Port to listen on", "3000").action(async (options) => {
     const port = parseInt(options.port, 10);

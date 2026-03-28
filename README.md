@@ -30,10 +30,10 @@ For local development from this repo:
 
 ```bash
 bun install
-bun run build:vsx-cli
+bun run package:vsix
 ```
 
-Then run the extension host from the repo with the launch config in `.vscode/launch.json`.
+That produces a `.vsix` with the bundled runtime for the machine you package on. Then run the extension host from the repo with the launch config in `.vscode/launch.json`.
 
 ### 3. CLI fallback
 
@@ -67,7 +67,7 @@ bun run dev report
 
 Current state:
 
-- The published extension should ship a platform-specific runtime so the user does not need Bun.
+- The published extension should ship a bundled runtime so the user does not need Bun.
 - Local development still uses Bun to build the runtime artifacts.
 - The CLI obviously requires Bun as well.
 
@@ -90,7 +90,7 @@ Current packaging direction:
 - `vscode/runtime/bin/linux-x64/agk-monitor`
 - `vscode/runtime/bin/linux-arm64/agk-monitor`
 
-These binaries are generated during packaging and release. They should not be committed to Git.
+These binaries are generated during packaging and release. They should not be committed to Git. Local packaging includes the runtime for the current platform, while CI still builds the full target matrix.
 
 ## Compatibility
 
