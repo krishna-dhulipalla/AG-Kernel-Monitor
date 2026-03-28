@@ -42,6 +42,7 @@ interface MappingResult {
   workspaceUri: string;
   mappingSource: string;
   mappingConfidence: number;
+  mappingNotes: string;
 }
 
 const UNMAPPED_WORKSPACE_ID = "__unmapped__";
@@ -106,6 +107,7 @@ function findWorkspaceMatch(
         workspaceUri: exact.uri,
         mappingSource: `${sourcePrefix}_exact`,
         mappingConfidence: exactConfidence,
+        mappingNotes: `Matched normalized workspace URI from ${sourcePrefix}.`,
       };
     }
 
@@ -117,6 +119,7 @@ function findWorkspaceMatch(
           workspaceUri: workspace.uri,
           mappingSource: `${sourcePrefix}_prefix`,
           mappingConfidence: prefixConfidence,
+          mappingNotes: `Matched a file URI beneath the workspace root from ${sourcePrefix}.`,
         };
       }
     }
@@ -157,7 +160,34 @@ function findWorkspaceByTitleHint(
     workspaceUri: workspace.uri,
     mappingSource: "title_hint",
     mappingConfidence: 0.55,
+    mappingNotes: "Matched the workspace name from conversation or brain-title text because no URI signal was available.",
   };
+}
+
+function buildUnmappedReason(
+  trajectory: TrajectorySummary | undefined,
+  brain: BrainScanEntry | undefined,
+): string {
+  const stateUriCount = trajectory?.workspaceUris.length ?? 0;
+  const brainUriCount = brain?.workspaceUris.length ?? 0;
+  const titleHints = [trajectory?.title, brain?.title].filter((value): value is string => Boolean(value?.trim()));
+
+  if (stateUriCount === 0 && brainUriCount === 0 && titleHints.length === 0) {
+    return "No workspace URI, brain URI, or usable title hint was found.";
+  }
+
+  const parts: string[] = [];
+  if (stateUriCount > 0) {
+    parts.push(`state.vscdb exposed ${stateUriCount} workspace URI${stateUriCount > 1 ? "s" : ""} but none matched a known workspace`);
+  }
+  if (brainUriCount > 0) {
+    parts.push(`brain artifacts exposed ${brainUriCount} workspace URI${brainUriCount > 1 ? "s" : ""} but none matched a known workspace`);
+  }
+  if (titleHints.length > 0) {
+    parts.push(`title hints (${titleHints.map((title) => `"${title}"`).join(", ")}) did not uniquely identify a workspace`);
+  }
+
+  return `${parts.join("; ")}.`;
 }
 
 function chooseLastActive(
@@ -257,6 +287,7 @@ export async function reconcile(db: MonitorDB, config: AgKernelConfig): Promise<
         workspaceUri: UNMAPPED_WORKSPACE_URI,
         mappingSource: "unmapped",
         mappingConfidence: 0,
+        mappingNotes: buildUnmappedReason(trajectory, brain),
       };
 
     if (mapping.workspaceId === UNMAPPED_WORKSPACE_ID) {
@@ -308,6 +339,7 @@ export async function reconcile(db: MonitorDB, config: AgKernelConfig): Promise<
       activity_source: activity.activitySource,
       mapping_source: mapping.mappingSource,
       mapping_confidence: mapping.mappingConfidence,
+      mapping_notes: mapping.mappingNotes,
       is_active: activeConversationId === conversationEntry.id ? 1 : 0,
     };
 

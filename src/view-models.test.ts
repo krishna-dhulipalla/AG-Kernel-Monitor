@@ -7,6 +7,7 @@ import {
   buildConversationViewModel,
   buildWorkspaceViewModel,
   getCurrentConversationView,
+  listWorkspaceViewModels,
 } from "./view-models";
 
 const config = {
@@ -60,6 +61,7 @@ describe("view-models", () => {
       activity_source: "log",
       mapping_source: "state_vscdb_exact",
       mapping_confidence: 1,
+      mapping_notes: "Matched normalized workspace URI from state_vscdb.",
       is_active: 1,
     };
     db.upsertConversation(conversation);
@@ -84,6 +86,7 @@ describe("view-models", () => {
     const conversationView = buildConversationViewModel(db, config, conversation);
     expect(conversationView.workspaceName).toBe("Hiring-Trend-Tracker");
     expect(conversationView.isActive).toBe(true);
+    expect(conversationView.mappingNote).toContain("state_vscdb");
     expect(conversationView.deltaEstimatedTokens).toBe(9_256);
     expect(conversationView.estimatedTotalTokens).toBe(19_256);
 
@@ -94,7 +97,35 @@ describe("view-models", () => {
 
     const current = getCurrentConversationView(db, config);
     expect(current.mode).toBe("active");
+    expect(current.detectionSource).toBe("log");
     expect(current.conversation?.id).toBe("conv-1");
+
+    db.close();
+  });
+
+  it("disambiguates duplicate workspace names with display hints", () => {
+    const dir = mkdtempSync(join(tmpdir(), "agk-db-"));
+    tempDirs.push(dir);
+
+    const db = new MonitorDB(join(dir, "monitor.db"));
+    db.upsertWorkspace({
+      id: "ws-a",
+      uri: "file:///c:/Users/example/Desktop/blocker_app",
+      name: "blocker_app",
+      last_seen: "2026-03-28T00:00:00.000Z",
+    });
+    db.upsertWorkspace({
+      id: "ws-b",
+      uri: "file:///c:/Users/example/Documents/blocker_app",
+      name: "blocker_app",
+      last_seen: "2026-03-28T00:00:00.000Z",
+    });
+
+    const views = listWorkspaceViewModels(db, config).filter((view) => view.name === "blocker_app");
+    expect(views).toHaveLength(2);
+    expect(views[0]?.displayName).not.toBe("blocker_app");
+    expect(views[1]?.displayName).not.toBe("blocker_app");
+    expect(views[0]?.displayName).not.toBe(views[1]?.displayName);
 
     db.close();
   });

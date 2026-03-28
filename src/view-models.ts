@@ -3,6 +3,7 @@ import { type Conversation, MonitorDB, type Workspace } from "./db/schema";
 import { explainWhyHeavy, formatBytes, formatRatio, formatTokens } from "./metrics/estimator";
 import { assessHealth, assessWorkspaceHealth } from "./metrics/health";
 import { getLatestDeltaTokens } from "./metrics/snapshotter";
+import { isPlaygroundUri, normalizeWorkspaceUri } from "./uri-utils";
 
 export interface ConversationViewModel {
   id: string;
@@ -21,6 +22,7 @@ export interface ConversationViewModel {
   lastActiveRelative: string;
   mappingSource: string | null;
   mappingConfidence: number | null;
+  mappingNote: string | null;
   estimatedPromptTokens: number;
   estimatedArtifactTokens: number;
   estimatedTotalTokens: number;
@@ -38,7 +40,9 @@ export interface ConversationViewModel {
 export interface WorkspaceViewModel {
   id: string;
   name: string;
+  displayName: string;
   uri: string;
+  uriHint: string | null;
   estimatedTokens: number;
   estimatedTokensFormatted: string;
   conversationCount: number;
@@ -60,6 +64,8 @@ export interface WorkspaceViewModel {
 
 export interface CurrentConversationResult {
   mode: "active" | "recent" | "none";
+  detectionSource: "log" | "active_flag" | "recent_fallback" | "none";
+  detectionNote: string;
   conversation: ConversationViewModel | null;
 }
 
@@ -91,6 +97,24 @@ function workspaceLookup(db: MonitorDB): Map<string, Workspace> {
   return map;
 }
 
+function buildWorkspaceUriHint(uri: string, workspaceName: string): string | null {
+  const normalized = normalizeWorkspaceUri(uri);
+  if (!normalized || normalized === "__unmapped__") return null;
+  if (isPlaygroundUri(normalized)) return "playground";
+
+  const withoutScheme = normalized.replace(/^file:\/\/\/?/i, "");
+  const parts = withoutScheme.split("/").filter(Boolean);
+  if (parts.length === 0) return null;
+
+  const last = parts[parts.length - 1] ?? "";
+  const parent = parts[parts.length - 2] ?? "";
+  if (last.toLowerCase() === workspaceName.toLowerCase()) {
+    return parent || last;
+  }
+
+  return parts.slice(-2).join("/");
+}
+
 export function buildConversationViewModel(
   db: MonitorDB,
   config: AgKernelConfig,
@@ -118,6 +142,7 @@ export function buildConversationViewModel(
     lastActiveRelative: relativeTime(conversation.last_active_at),
     mappingSource: conversation.mapping_source,
     mappingConfidence: conversation.mapping_confidence,
+    mappingNote: conversation.mapping_notes,
     estimatedPromptTokens: conversation.estimated_prompt_tokens,
     estimatedArtifactTokens: conversation.estimated_artifact_tokens,
     estimatedTotalTokens: conversation.estimated_tokens,
@@ -163,7 +188,9 @@ export function buildWorkspaceViewModel(
   return {
     id: workspace.id,
     name: workspace.name,
+    displayName: workspace.name,
     uri: workspace.uri,
+    uriHint: buildWorkspaceUriHint(workspace.uri, workspace.name),
     estimatedTokens: totalEstimatedTokens,
     estimatedTokensFormatted: formatTokens(totalEstimatedTokens),
     conversationCount: views.length,
@@ -185,9 +212,26 @@ export function buildWorkspaceViewModel(
 }
 
 export function listWorkspaceViewModels(db: MonitorDB, config: AgKernelConfig): WorkspaceViewModel[] {
-  return db.getAllWorkspaces()
+  const views = db.getAllWorkspaces()
     .map((workspace) => buildWorkspaceViewModel(db, config, workspace))
     .sort((left, right) => right.estimatedTokens - left.estimatedTokens);
+
+  const duplicateCounts = new Map<string, number>();
+  for (const view of views) {
+    duplicateCounts.set(view.name, (duplicateCounts.get(view.name) ?? 0) + 1);
+  }
+
+  return views.map((view) => {
+    if ((duplicateCounts.get(view.name) ?? 0) <= 1) {
+      return view;
+    }
+
+    const suffix = view.uriHint ?? view.id.slice(0, 8);
+    return {
+      ...view,
+      displayName: `${view.name} [${suffix}]`,
+    };
+  });
 }
 
 export function getCurrentConversationView(db: MonitorDB, config: AgKernelConfig): CurrentConversationResult {
@@ -195,6 +239,10 @@ export function getCurrentConversationView(db: MonitorDB, config: AgKernelConfig
   if (activeConversation) {
     return {
       mode: "active",
+      detectionSource: activeConversation.activity_source === "log" ? "log" : "active_flag",
+      detectionNote: activeConversation.activity_source === "log"
+        ? "Detected from Antigravity runtime log activity."
+        : "Marked active from the latest runtime signal.",
       conversation: buildConversationViewModel(db, config, activeConversation),
     };
   }
@@ -203,12 +251,16 @@ export function getCurrentConversationView(db: MonitorDB, config: AgKernelConfig
   if (mostRecentConversation) {
     return {
       mode: "recent",
+      detectionSource: "recent_fallback",
+      detectionNote: "No live active conversation could be confirmed from logs, so the most recent session is shown instead.",
       conversation: buildConversationViewModel(db, config, mostRecentConversation),
     };
   }
 
   return {
     mode: "none",
+    detectionSource: "none",
+    detectionNote: "No conversation data is available yet.",
     conversation: null,
   };
 }

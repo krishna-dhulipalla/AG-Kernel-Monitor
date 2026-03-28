@@ -1,5 +1,5 @@
 /**
- * `agk report` — cache health and cleanup report.
+ * `agk report` - cache health and cleanup report.
  */
 
 import { Command } from "commander";
@@ -31,7 +31,7 @@ export function registerReportCommand(program: Command, db: MonitorDB, config: A
       const useJson = options.json || program.opts().json;
 
       if (!useJson) {
-        console.log(chalk.dim("🔍 Scanning Antigravity data..."));
+        console.log(chalk.dim("Scanning Antigravity data..."));
       }
       await reconcile(db, config);
 
@@ -42,7 +42,7 @@ export function registerReportCommand(program: Command, db: MonitorDB, config: A
         return;
       }
 
-      console.log(chalk.bold("AG Kernel Monitor — Health Report"));
+      console.log(chalk.bold("AG Kernel Monitor - Health Report"));
       console.log();
 
       console.log(chalk.bold("Current Risk"));
@@ -51,7 +51,12 @@ export function registerReportCommand(program: Command, db: MonitorDB, config: A
         console.log(chalk.dim(`  Session: ${current.id}`));
         console.log(chalk.dim(`  Workspace: ${current.workspaceName}`));
         console.log(chalk.dim(`  Title: ${current.title ?? "Untitled"}`));
+        console.log(chalk.dim(`  Detection: ${report.currentConversation.detectionNote}`));
         console.log(chalk.dim(`  Estimated Context: ${current.estimatedTotalTokensFormatted} tokens (${current.contextRatioFormatted})`));
+        console.log(chalk.dim(`  Mapping: ${current.mappingSource ?? "unknown"} (${current.mappingConfidence ?? 0})`));
+        if (current.mappingNote) {
+          console.log(chalk.dim(`  Mapping Note: ${current.mappingNote}`));
+        }
         console.log(chalk.dim(`  Why Heavy: ${current.whyHeavy}`));
       } else {
         console.log(chalk.dim("  No conversation data available."));
@@ -98,17 +103,19 @@ export function registerReportCommand(program: Command, db: MonitorDB, config: A
             chalk.bold("Title"),
             chalk.bold("Est.Total"),
             chalk.bold("Last Active"),
+            chalk.bold("Why Unmapped"),
           ],
           style: { head: [], border: [] },
-          colWidths: [16, 36, 12, 14],
+          colWidths: [16, 28, 12, 14, 54],
         });
 
         for (const session of report.unmappedConversations) {
           unmappedTable.push([
             `${session.id.slice(0, 12)}...`,
-            truncate(session.title ?? "Untitled", 34),
+            truncate(session.title ?? "Untitled", 26),
             session.estimatedTotalTokensFormatted,
             session.lastActiveRelative,
+            truncate(session.mappingNote ?? "No mapping diagnosis available.", 52),
           ]);
         }
 
@@ -163,9 +170,9 @@ function buildReport(db: MonitorDB, config: AgKernelConfig): ReportData {
   const currentConversation = getCurrentConversationView(db, config);
   const largestSessions = [...conversations].sort((left, right) => right.estimatedTotalTokens - left.estimatedTotalTokens);
   const unmappedConversations = conversations.filter((conversation) => conversation.mappingSource === "unmapped");
-  const recommendedCleanupTargets = largestSessions.filter(
-    (conversation) => conversation.contextRatio >= 0.8 || conversation.mappingSource === "unmapped"
-  ).slice(0, 5);
+  const recommendedCleanupTargets = largestSessions
+    .filter((conversation) => conversation.contextRatio >= 0.8 || conversation.mappingSource === "unmapped")
+    .slice(0, 5);
 
   const pbIds = new Set<string>();
   const conversationsDir = getConversationsDir();

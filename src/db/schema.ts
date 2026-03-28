@@ -41,6 +41,7 @@ export interface Conversation {
   activity_source: string | null;
   mapping_source: string | null;
   mapping_confidence: number | null;
+  mapping_notes: string | null;
   is_active: number;
 }
 
@@ -85,6 +86,7 @@ const SCHEMA_SQL = `
     activity_source TEXT,
     mapping_source TEXT,
     mapping_confidence REAL,
+    mapping_notes TEXT,
     is_active INTEGER DEFAULT 0,
     FOREIGN KEY (workspace_id) REFERENCES workspaces(id)
   );
@@ -135,6 +137,7 @@ export class MonitorDB {
     this.ensureColumn("conversations", "activity_source", "TEXT");
     this.ensureColumn("conversations", "mapping_source", "TEXT");
     this.ensureColumn("conversations", "mapping_confidence", "REAL");
+    this.ensureColumn("conversations", "mapping_notes", "TEXT");
     this.ensureColumn("conversations", "is_active", "INTEGER DEFAULT 0");
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_conversations_active ON conversations(is_active, last_active_at)");
   }
@@ -190,9 +193,9 @@ export class MonitorDB {
          brain_artifact_count, resolved_version_count, message_count,
          message_count_source, estimated_prompt_tokens, estimated_artifact_tokens,
          estimated_tokens, annotation_timestamp, created_at, last_modified,
-         last_active_at, activity_source, mapping_source, mapping_confidence, is_active
+         last_active_at, activity_source, mapping_source, mapping_confidence, mapping_notes, is_active
        )
-       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)
+       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)
        ON CONFLICT(id) DO UPDATE SET
          workspace_id = excluded.workspace_id,
          title = excluded.title,
@@ -211,6 +214,7 @@ export class MonitorDB {
          activity_source = excluded.activity_source,
          mapping_source = excluded.mapping_source,
          mapping_confidence = excluded.mapping_confidence,
+         mapping_notes = excluded.mapping_notes,
          is_active = excluded.is_active`,
       [
         conv.id,
@@ -232,6 +236,7 @@ export class MonitorDB {
         conv.activity_source,
         conv.mapping_source,
         conv.mapping_confidence,
+        conv.mapping_notes,
         conv.is_active,
       ]
     );
