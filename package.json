@@ -113,6 +113,10 @@
     "@types/bun": "^1.2.0",
     "@vscode/vsce": "^3.6.1"
   },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/krishna-dhulipalla/AG-Kernel-Monitor"
+  },
   "keywords": [
     "antigravity",
     "token-monitor",
