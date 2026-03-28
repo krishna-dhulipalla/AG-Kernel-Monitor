@@ -10,24 +10,13 @@
 import { readdirSync, readFileSync, existsSync } from "fs";
 import { join } from "path";
 import { getWorkspaceStorageDir } from "../paths";
+import { extractWorkspaceNameFromUri, normalizeWorkspaceUri } from "../uri-utils";
 
 export interface WorkspaceStorageEntry {
   hash: string;
   uri: string;
+  normalizedUri: string;
   name: string;
-}
-
-/**
- * Extract workspace name from a URI.
- */
-function extractNameFromUri(uri: string): string {
-  try {
-    const decoded = decodeURIComponent(uri);
-    const parts = decoded.replace(/\/$/, "").split("/");
-    return parts[parts.length - 1] || decoded;
-  } catch {
-    return uri;
-  }
 }
 
 /**
@@ -60,10 +49,13 @@ export function scanWorkspaceStorage(customPath?: string): WorkspaceStorageEntry
         // workspace.json typically has a { folder: "file:///..." } structure
         const uri = parsed.folder || parsed.workspace || parsed.uri || "";
         if (uri) {
+          const normalizedUri = normalizeWorkspaceUri(String(uri));
+          if (!normalizedUri) continue;
           entries.push({
             hash: dir.name,
             uri: String(uri),
-            name: extractNameFromUri(String(uri)),
+            normalizedUri,
+            name: extractWorkspaceNameFromUri(String(uri)),
           });
         }
       } catch {

@@ -25,6 +25,16 @@ import { registerServeCommand } from "../server/index";
 
 const program = new Command();
 
+function getConfigPathFromArgv(argv: string[]): string | undefined {
+  const flagIndex = argv.findIndex((arg) => arg === "--config");
+  if (flagIndex >= 0) {
+    return argv[flagIndex + 1];
+  }
+
+  const inlineArg = argv.find((arg) => arg.startsWith("--config="));
+  return inlineArg ? inlineArg.slice("--config=".length) : undefined;
+}
+
 program
   .name("agk")
   .description("Deep token consumption and cache bloat monitoring for Google Antigravity sessions")
@@ -33,7 +43,7 @@ program
   .option("--json", "Output raw JSON instead of formatted tables");
 
 // Load config and create DB connection (shared across commands)
-const config = loadConfig();
+const config = loadConfig(getConfigPathFromArgv(process.argv));
 const db = new MonitorDB(config.dbPath);
 
 // Register subcommands

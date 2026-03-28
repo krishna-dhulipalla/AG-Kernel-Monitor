@@ -1,11 +1,5 @@
 /**
  * `agk serve` — JSON API server using Bun.serve().
- *
- * Endpoints:
- *   GET /api/workspaces                  → workspace summary JSON
- *   GET /api/conversations?workspace=X   → conversation details
- *   GET /api/conversation/:uuid          → single conversation with snapshots
- *   GET /api/health                      → overall system health + ingestion stats
  */
 
 import { Command } from "commander";
@@ -13,8 +7,13 @@ import chalk from "chalk";
 import type { MonitorDB } from "../db/schema";
 import type { AgKernelConfig } from "../config";
 import { reconcile } from "../ingest/reconciler";
-import { assessHealth, assessWorkspaceHealth } from "../metrics/health";
-import { formatBytes, formatTokens } from "../metrics/estimator";
+import {
+  buildConversationViewModel,
+  buildWorkspaceViewModel,
+  getCurrentConversationView,
+  listConversationViewModels,
+  listWorkspaceViewModels,
+} from "../view-models";
 
 export function registerServeCommand(program: Command, db: MonitorDB, config: AgKernelConfig): void {
   program
@@ -24,19 +23,17 @@ export function registerServeCommand(program: Command, db: MonitorDB, config: Ag
     .action(async (options) => {
       const port = parseInt(options.port, 10);
 
-      // Run initial ingestion
       console.log(chalk.dim("🔍 Running initial scan..."));
       const stats = await reconcile(db, config);
       console.log(chalk.dim(`   Scanned ${stats.conversationsTotal} conversations`));
       console.log();
 
-      const server = Bun.serve({
+      Bun.serve({
         port,
         fetch(req) {
           const url = new URL(req.url);
           const path = url.pathname;
 
-          // CORS headers
           const headers = {
             "Content-Type": "application/json",
             "Access-Control-Allow-Origin": "*",
@@ -49,157 +46,87 @@ export function registerServeCommand(program: Command, db: MonitorDB, config: Ag
           }
 
           try {
-            // ── GET /api/workspaces ──
             if (path === "/api/workspaces") {
-              const workspaces = db.getAllWorkspaces();
-              const data = workspaces
-                .filter((ws) => ws.conversation_count > 0)
-                .map((ws) => {
-                  const conversations = db.getConversationsByWorkspace(ws.id);
-                  const totalTokens = conversations.reduce((sum, c) => sum + c.estimated_tokens, 0);
-                  const totalMessages = conversations.reduce((sum, c) => sum + (c.message_count || 0), 0);
-                  const health = assessWorkspaceHealth(
-                    conversations.map((c) => c.estimated_tokens),
-                    config.bloatLimit
-                  );
-
-                  return {
-                    id: ws.id,
-                    name: ws.name,
-                    uri: ws.uri,
-                    estimatedTokens: totalTokens,
-                    estimatedTokensFormatted: formatTokens(totalTokens),
-                    conversationCount: ws.conversation_count,
-                    messageCount: totalMessages,
-                    brainSizeBytes: ws.total_brain_bytes,
-                    brainSizeFormatted: formatBytes(ws.total_brain_bytes),
-                    pbSizeBytes: ws.total_pb_bytes,
-                    pbSizeFormatted: formatBytes(ws.total_pb_bytes),
-                    health: health.status,
-                    healthEmoji: health.emoji,
-                    lastSeen: ws.last_seen,
-                  };
-                });
-
-              return new Response(JSON.stringify({ workspaces: data }), { headers });
+              const workspaces = listWorkspaceViewModels(db, config);
+              return new Response(JSON.stringify({
+                currentConversation: getCurrentConversationView(db, config),
+                workspaces,
+              }), { headers });
             }
 
-            // ── GET /api/conversations?workspace=<name> ──
             if (path === "/api/conversations") {
               const workspaceName = url.searchParams.get("workspace");
-              let conversations;
+              const workspace = workspaceName
+                ? db.getAllWorkspaces().find(
+                    (entry) =>
+                      entry.name.toLowerCase() === workspaceName.toLowerCase()
+                      || entry.name.toLowerCase().includes(workspaceName.toLowerCase())
+                  ) ?? null
+                : null;
 
-              if (workspaceName) {
-                const ws = db.getAllWorkspaces().find(
-                  (w) =>
-                    w.name.toLowerCase() === workspaceName.toLowerCase() ||
-                    w.name.toLowerCase().includes(workspaceName.toLowerCase())
-                );
-                if (!ws) {
-                  return new Response(JSON.stringify({ error: "Workspace not found" }), {
-                    status: 404,
-                    headers,
-                  });
-                }
-                conversations = db.getConversationsByWorkspace(ws.id);
-              } else {
-                conversations = db.getAllConversations();
+              if (workspaceName && !workspace) {
+                return new Response(JSON.stringify({ error: "Workspace not found" }), { status: 404, headers });
               }
 
-              const data = conversations.map((c) => {
-                const health = assessHealth(c.estimated_tokens, config.bloatLimit);
-                return {
-                  ...c,
-                  estimatedTokensFormatted: formatTokens(c.estimated_tokens),
-                  pbSizeFormatted: formatBytes(c.pb_file_bytes),
-                  brainSizeFormatted: formatBytes(c.brain_folder_bytes),
-                  health: health.status,
-                  healthEmoji: health.emoji,
-                };
-              });
-
-              return new Response(JSON.stringify({ conversations: data }), { headers });
-            }
-
-            // ── GET /api/conversation/:uuid ──
-            const convMatch = path.match(/^\/api\/conversation\/([a-f0-9-]+)$/i);
-            if (convMatch) {
-              const uuid = convMatch[1];
-              const conv = db.getConversation(uuid);
-              if (!conv) {
-                return new Response(JSON.stringify({ error: "Conversation not found" }), {
-                  status: 404,
-                  headers,
-                });
-              }
-
-              const snapshots = db.getSnapshotHistory(uuid);
-              const health = assessHealth(conv.estimated_tokens, config.bloatLimit);
-
-              return new Response(
-                JSON.stringify({
-                  conversation: {
-                    ...conv,
-                    estimatedTokensFormatted: formatTokens(conv.estimated_tokens),
-                    pbSizeFormatted: formatBytes(conv.pb_file_bytes),
-                    brainSizeFormatted: formatBytes(conv.brain_folder_bytes),
-                    health: health.status,
-                    healthEmoji: health.emoji,
-                    bloatScore: health.ratio,
-                  },
-                  snapshots,
-                }),
-                { headers }
+              const conversations = listConversationViewModels(
+                db,
+                config,
+                workspace ? db.getConversationsByWorkspace(workspace.id) : db.getAllConversations(),
               );
+
+              return new Response(JSON.stringify({
+                currentConversation: getCurrentConversationView(db, config),
+                workspace: workspace ? buildWorkspaceViewModel(db, config, workspace) : null,
+                conversations,
+              }), { headers });
             }
 
-            // ── GET /api/health ──
+            const conversationMatch = path.match(/^\/api\/conversation\/([a-f0-9-]+)$/i);
+            if (conversationMatch) {
+              const conversation = db.getConversation(conversationMatch[1]);
+              if (!conversation) {
+                return new Response(JSON.stringify({ error: "Conversation not found" }), { status: 404, headers });
+              }
+
+              return new Response(JSON.stringify({
+                conversation: buildConversationViewModel(db, config, conversation),
+                snapshots: db.getSnapshotHistory(conversation.id),
+              }), { headers });
+            }
+
             if (path === "/api/health") {
-              const totalStats = db.getTotalStats();
-              const allConversations = db.getAllConversations();
-              const bloatViolations = allConversations.filter(
-                (c) => c.estimated_tokens > config.bloatLimit
-              );
+              const currentConversation = getCurrentConversationView(db, config);
+              const workspaces = listWorkspaceViewModels(db, config);
+              const largestWorkspace = workspaces[0] ?? null;
+              const unmappedCount = listConversationViewModels(db, config, db.getAllConversations())
+                .filter((conversation) => conversation.mappingSource === "unmapped")
+                .length;
 
-              return new Response(
-                JSON.stringify({
-                  status: bloatViolations.length > 0 ? "degraded" : "healthy",
-                  totalConversations: totalStats.total_conversations,
-                  totalEstimatedTokens: totalStats.total_estimated_tokens,
-                  totalEstimatedTokensFormatted: formatTokens(totalStats.total_estimated_tokens),
-                  totalPbBytes: totalStats.total_pb_bytes,
-                  totalPbBytesFormatted: formatBytes(totalStats.total_pb_bytes),
-                  totalBrainBytes: totalStats.total_brain_bytes,
-                  totalBrainBytesFormatted: formatBytes(totalStats.total_brain_bytes),
-                  bloatLimit: config.bloatLimit,
-                  bloatViolationCount: bloatViolations.length,
-                  config: {
-                    bloatLimit: config.bloatLimit,
-                    bytesPerToken: config.bytesPerToken,
-                  },
-                }),
-                { headers }
-              );
+              return new Response(JSON.stringify({
+                status: currentConversation.conversation && currentConversation.conversation.contextRatio >= 1
+                  ? "degraded"
+                  : "healthy",
+                currentConversation,
+                topWorkspace: largestWorkspace,
+                unmappedConversationCount: unmappedCount,
+                bloatLimit: config.bloatLimit,
+              }), { headers });
             }
 
-            // ── 404 ──
-            return new Response(
-              JSON.stringify({
-                error: "Not found",
-                availableEndpoints: [
-                  "GET /api/workspaces",
-                  "GET /api/conversations?workspace=<name>",
-                  "GET /api/conversation/<uuid>",
-                  "GET /api/health",
-                ],
-              }),
-              { status: 404, headers }
-            );
+            return new Response(JSON.stringify({
+              error: "Not found",
+              availableEndpoints: [
+                "GET /api/workspaces",
+                "GET /api/conversations?workspace=<name>",
+                "GET /api/conversation/<uuid>",
+                "GET /api/health",
+              ],
+            }), { status: 404, headers });
           } catch (err) {
-            return new Response(
-              JSON.stringify({ error: "Internal server error", message: String(err) }),
-              { status: 500, headers }
-            );
+            return new Response(JSON.stringify({
+              error: "Internal server error",
+              message: String(err),
+            }), { status: 500, headers });
           }
         },
       });

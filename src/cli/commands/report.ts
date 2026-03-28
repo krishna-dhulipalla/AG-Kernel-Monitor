@@ -1,245 +1,215 @@
 /**
- * `agk report` — Cache sync and ghost artifact report.
- *
- * Reports:
- *   - Orphan conversations (.pb without brain folder, or vice versa)
- *   - Orphan annotations (.pbtxt without matching conversation)
- *   - Ghost artifacts: brain folders with stale data
- *   - Bloat limit violations
- *   - Disk usage summary
+ * `agk report` — cache health and cleanup report.
  */
 
 import { Command } from "commander";
 import chalk from "chalk";
 import Table from "cli-table3";
-import { readdirSync, existsSync } from "fs";
 import { basename } from "path";
+import { existsSync, readdirSync } from "fs";
 import type { MonitorDB } from "../../db/schema";
 import type { AgKernelConfig } from "../../config";
 import { reconcile } from "../../ingest/reconciler";
-import { assessHealth } from "../../metrics/health";
-import { formatBytes, formatTokens } from "../../metrics/estimator";
-import { getConversationsDir, getBrainDir, getAnnotationsDir } from "../../paths";
+import { getAnnotationsDir, getBrainDir, getConversationsDir } from "../../paths";
+import { getCurrentConversationView, listConversationViewModels } from "../../view-models";
+
+interface ReportData {
+  currentConversation: ReturnType<typeof getCurrentConversationView>;
+  largestSessions: ReturnType<typeof listConversationViewModels>;
+  unmappedConversations: ReturnType<typeof listConversationViewModels>;
+  recommendedCleanupTargets: ReturnType<typeof listConversationViewModels>;
+  orphanBrainFolders: string[];
+  orphanAnnotations: string[];
+}
 
 export function registerReportCommand(program: Command, db: MonitorDB, config: AgKernelConfig): void {
   program
     .command("report")
-    .description("Generate a cache health report — orphans, ghosts, bloat violations")
+    .description("Generate a cache health report with cleanup targets")
     .option("--json", "Output raw JSON")
     .action(async (options) => {
       const useJson = options.json || program.opts().json;
 
-      // Run full ingestion first
-      console.log(chalk.dim("🔍 Scanning Antigravity data..."));
-      const stats = await reconcile(db, config);
-      console.log();
+      if (!useJson) {
+        console.log(chalk.dim("🔍 Scanning Antigravity data..."));
+      }
+      await reconcile(db, config);
 
-      // ── Collect report data ──
-      const report = buildReport(db, config, stats);
+      const report = buildReport(db, config);
 
       if (useJson) {
         console.log(JSON.stringify(report, null, 2));
         return;
       }
 
-      // ── Display report ──
-      console.log(chalk.bold.underline("📊 AG Kernel Monitor — Health Report"));
+      console.log(chalk.bold("AG Kernel Monitor — Health Report"));
       console.log();
 
-      // 1. Disk usage summary
-      console.log(chalk.bold("💾 Disk Usage Summary"));
-      const diskTable = new Table({
-        style: { head: [], border: [] },
-      });
-      diskTable.push(
-        ["Total .pb files", formatBytes(report.diskUsage.totalPbBytes)],
-        ["Total brain folders", formatBytes(report.diskUsage.totalBrainBytes)],
-        ["Total conversations", String(report.diskUsage.totalConversations)],
-        ["Total estimated tokens", formatTokens(report.diskUsage.totalEstimatedTokens)],
-      );
-      console.log(diskTable.toString());
+      console.log(chalk.bold("Current Risk"));
+      if (report.currentConversation.conversation) {
+        const current = report.currentConversation.conversation;
+        console.log(chalk.dim(`  Session: ${current.id}`));
+        console.log(chalk.dim(`  Workspace: ${current.workspaceName}`));
+        console.log(chalk.dim(`  Title: ${current.title ?? "Untitled"}`));
+        console.log(chalk.dim(`  Estimated Context: ${current.estimatedTotalTokensFormatted} tokens (${current.contextRatioFormatted})`));
+        console.log(chalk.dim(`  Why Heavy: ${current.whyHeavy}`));
+      } else {
+        console.log(chalk.dim("  No conversation data available."));
+      }
       console.log();
 
-      // 2. Bloat violations
-      if (report.bloatViolations.length > 0) {
-        console.log(chalk.bold.red(`🚨 Bloat Limit Violations (${report.bloatViolations.length})`));
-        const bloatTable = new Table({
-          head: [chalk.bold("Session ID"), chalk.bold("Workspace"), chalk.bold("Est.Tokens"), chalk.bold("Health")],
+      if (report.largestSessions.length > 0) {
+        console.log(chalk.bold("Largest Sessions"));
+        const largestTable = new Table({
+          head: [
+            chalk.bold("Session"),
+            chalk.bold("Workspace"),
+            chalk.bold("Est.Total"),
+            chalk.bold("Msgs"),
+            chalk.bold("Last Active"),
+            chalk.bold("Health"),
+          ],
           style: { head: [], border: [] },
+          colWidths: [16, 26, 12, 10, 14, 10],
         });
-        for (const v of report.bloatViolations) {
-          bloatTable.push([
-            v.conversationId.slice(0, 12) + "...",
-            v.workspaceName,
-            formatTokens(v.estimatedTokens),
-            v.healthEmoji + " " + v.healthLabel,
+
+        for (const session of report.largestSessions.slice(0, 8)) {
+          largestTable.push([
+            `${session.id.slice(0, 12)}...`,
+            truncate(session.workspaceName, 24),
+            session.estimatedTotalTokensFormatted,
+            session.messageCount !== null ? String(session.messageCount) : "unknown",
+            session.lastActiveRelative,
+            session.healthEmoji,
           ]);
         }
-        console.log(bloatTable.toString());
+
+        console.log(largestTable.toString());
         console.log();
+      }
+
+      console.log(chalk.bold("Unmapped Conversations"));
+      if (report.unmappedConversations.length === 0) {
+        console.log(chalk.dim("  No unmapped conversations detected."));
       } else {
-        console.log(chalk.green("✅ No bloat limit violations"));
-        console.log();
-      }
+        const unmappedTable = new Table({
+          head: [
+            chalk.bold("Session"),
+            chalk.bold("Title"),
+            chalk.bold("Est.Total"),
+            chalk.bold("Last Active"),
+          ],
+          style: { head: [], border: [] },
+          colWidths: [16, 36, 12, 14],
+        });
 
-      // 3. Orphan conversations
-      if (report.orphanConversations.length > 0) {
-        console.log(chalk.bold.yellow(`👻 Orphan Conversations (${report.orphanConversations.length})`));
-        console.log(chalk.dim("   .pb files without a corresponding brain folder:"));
-        for (const id of report.orphanConversations) {
-          console.log(chalk.dim(`   - ${id}`));
+        for (const session of report.unmappedConversations) {
+          unmappedTable.push([
+            `${session.id.slice(0, 12)}...`,
+            truncate(session.title ?? "Untitled", 34),
+            session.estimatedTotalTokensFormatted,
+            session.lastActiveRelative,
+          ]);
         }
-        console.log();
-      }
 
-      // 4. Orphan brain folders
-      if (report.orphanBrainFolders.length > 0) {
-        console.log(chalk.bold.yellow(`🧠 Orphan Brain Folders (${report.orphanBrainFolders.length})`));
-        console.log(chalk.dim("   Brain folders without a corresponding .pb file:"));
-        for (const id of report.orphanBrainFolders) {
-          console.log(chalk.dim(`   - ${id}`));
+        console.log(unmappedTable.toString());
+      }
+      console.log();
+
+      console.log(chalk.bold("Orphaned Artifacts"));
+      if (report.orphanBrainFolders.length === 0 && report.orphanAnnotations.length === 0) {
+        console.log(chalk.dim("  No orphaned brain folders or annotation files found."));
+      } else {
+        if (report.orphanBrainFolders.length > 0) {
+          console.log(chalk.dim(`  Brain folders: ${report.orphanBrainFolders.join(", ")}`));
         }
-        console.log();
-      }
-
-      // 5. Orphan annotations
-      if (report.orphanAnnotations.length > 0) {
-        console.log(chalk.bold.yellow(`📝 Orphan Annotations (${report.orphanAnnotations.length})`));
-        console.log(chalk.dim("   .pbtxt files without a matching conversation:"));
-        for (const id of report.orphanAnnotations) {
-          console.log(chalk.dim(`   - ${id}`));
+        if (report.orphanAnnotations.length > 0) {
+          console.log(chalk.dim(`  Annotation files: ${report.orphanAnnotations.join(", ")}`));
         }
-        console.log();
       }
+      console.log();
 
-      // 6. Ingestion stats
-      console.log(chalk.bold("📈 Ingestion Stats"));
-      const ingestTable = new Table({
-        style: { head: [], border: [] },
-      });
-      ingestTable.push(
-        ["Workspaces found", String(stats.workspacesFound)],
-        ["Conversations mapped", String(stats.conversationsMapped)],
-        ["Conversations unmapped", String(stats.conversationsUnmapped)],
-        ["Brain folders found", String(stats.brainFoldersFound)],
-        ["Orphan brain folders", String(stats.orphanBrainFolders)],
-      );
-      console.log(ingestTable.toString());
+      console.log(chalk.bold("Recommended Cleanup Targets"));
+      if (report.recommendedCleanupTargets.length === 0) {
+        console.log(chalk.dim("  No urgent cleanup targets right now."));
+      } else {
+        const cleanupTable = new Table({
+          head: [
+            chalk.bold("Session"),
+            chalk.bold("Workspace"),
+            chalk.bold("Est.Total"),
+            chalk.bold("Why"),
+          ],
+          style: { head: [], border: [] },
+          colWidths: [16, 24, 12, 48],
+        });
+
+        for (const session of report.recommendedCleanupTargets) {
+          cleanupTable.push([
+            `${session.id.slice(0, 12)}...`,
+            truncate(session.workspaceName, 22),
+            session.estimatedTotalTokensFormatted,
+            truncate(session.whyHeavy, 46),
+          ]);
+        }
+
+        console.log(cleanupTable.toString());
+      }
     });
 }
 
-interface ReportData {
-  diskUsage: {
-    totalPbBytes: number;
-    totalBrainBytes: number;
-    totalConversations: number;
-    totalEstimatedTokens: number;
-  };
-  bloatViolations: {
-    conversationId: string;
-    workspaceName: string;
-    estimatedTokens: number;
-    healthEmoji: string;
-    healthLabel: string;
-  }[];
-  orphanConversations: string[];
-  orphanBrainFolders: string[];
-  orphanAnnotations: string[];
-}
+function buildReport(db: MonitorDB, config: AgKernelConfig): ReportData {
+  const conversations = listConversationViewModels(db, config, db.getAllConversations());
+  const currentConversation = getCurrentConversationView(db, config);
+  const largestSessions = [...conversations].sort((left, right) => right.estimatedTotalTokens - left.estimatedTotalTokens);
+  const unmappedConversations = conversations.filter((conversation) => conversation.mappingSource === "unmapped");
+  const recommendedCleanupTargets = largestSessions.filter(
+    (conversation) => conversation.contextRatio >= 0.8 || conversation.mappingSource === "unmapped"
+  ).slice(0, 5);
 
-function buildReport(
-  db: MonitorDB,
-  config: AgKernelConfig,
-  stats: any,
-): ReportData {
-  const totalStats = db.getTotalStats();
-  const allConversations = db.getAllConversations();
-  const allWorkspaces = db.getAllWorkspaces();
-
-  // Build workspace ID → name map
-  const wsNameMap = new Map<string, string>();
-  for (const ws of allWorkspaces) {
-    wsNameMap.set(ws.id, ws.name);
-  }
-
-  // Bloat violations
-  const bloatViolations = allConversations
-    .filter((c) => c.estimated_tokens > config.bloatLimit * 0.8)
-    .map((c) => {
-      const health = assessHealth(c.estimated_tokens, config.bloatLimit);
-      return {
-        conversationId: c.id,
-        workspaceName: c.workspace_id ? wsNameMap.get(c.workspace_id) || "Unknown" : "Unmapped",
-        estimatedTokens: c.estimated_tokens,
-        healthEmoji: health.emoji,
-        healthLabel: health.label,
-      };
-    })
-    .sort((a, b) => b.estimatedTokens - a.estimatedTokens);
-
-  // Orphan detection
-  const orphanConversations: string[] = [];
-  const orphanBrainFolders: string[] = [];
-  const orphanAnnotations: string[] = [];
-
-  // Get .pb file IDs
   const pbIds = new Set<string>();
-  const convDir = getConversationsDir();
-  if (existsSync(convDir)) {
-    for (const file of readdirSync(convDir)) {
+  const conversationsDir = getConversationsDir();
+  if (existsSync(conversationsDir)) {
+    for (const file of readdirSync(conversationsDir)) {
       if (file.endsWith(".pb")) {
         pbIds.add(basename(file, ".pb"));
       }
     }
   }
 
-  // Get brain folder IDs
-  const brainIds = new Set<string>();
+  const orphanBrainFolders: string[] = [];
   const brainDir = getBrainDir();
   if (existsSync(brainDir)) {
     for (const entry of readdirSync(brainDir, { withFileTypes: true })) {
-      if (entry.isDirectory() && !entry.name.startsWith(".")) {
-        brainIds.add(entry.name);
+      if (entry.isDirectory() && !pbIds.has(entry.name)) {
+        orphanBrainFolders.push(entry.name);
       }
     }
   }
 
-  // Get annotation IDs
-  const annIds = new Set<string>();
-  const annDir = getAnnotationsDir();
-  if (existsSync(annDir)) {
-    for (const file of readdirSync(annDir)) {
+  const orphanAnnotations: string[] = [];
+  const annotationsDir = getAnnotationsDir();
+  if (existsSync(annotationsDir)) {
+    for (const file of readdirSync(annotationsDir)) {
       if (file.endsWith(".pbtxt")) {
-        annIds.add(basename(file, ".pbtxt"));
+        const id = basename(file, ".pbtxt");
+        if (!pbIds.has(id)) {
+          orphanAnnotations.push(id);
+        }
       }
     }
-  }
-
-  // .pb without brain
-  for (const id of pbIds) {
-    if (!brainIds.has(id)) orphanConversations.push(id);
-  }
-
-  // brain without .pb
-  for (const id of brainIds) {
-    if (!pbIds.has(id)) orphanBrainFolders.push(id);
-  }
-
-  // annotations without .pb
-  for (const id of annIds) {
-    if (!pbIds.has(id)) orphanAnnotations.push(id);
   }
 
   return {
-    diskUsage: {
-      totalPbBytes: totalStats.total_pb_bytes,
-      totalBrainBytes: totalStats.total_brain_bytes,
-      totalConversations: totalStats.total_conversations,
-      totalEstimatedTokens: totalStats.total_estimated_tokens,
-    },
-    bloatViolations,
-    orphanConversations,
+    currentConversation,
+    largestSessions,
+    unmappedConversations,
+    recommendedCleanupTargets,
     orphanBrainFolders,
     orphanAnnotations,
   };
+}
+
+function truncate(value: string, maxLength: number): string {
+  return value.length > maxLength ? `${value.slice(0, maxLength - 3)}...` : value;
 }

@@ -84,10 +84,16 @@ export function readAnnotation(conversationId: string, customDir?: string): Anno
     const content = readFileSync(annPath, "utf-8");
     let lastUserViewTime: number | null = null;
 
-    // Parse pbtxt format: look for last_user_view_time field
-    const match = content.match(/last_user_view_time\s*:\s*(\d+)/);
-    if (match) {
-      lastUserViewTime = parseInt(match[1], 10);
+    // Parse pbtxt format:
+    //   last_user_view_time:{seconds:1769817543 nanos:895000000}
+    //   last_user_view_time:1769817543
+    const nestedSeconds = content.match(/last_user_view_time\s*:\s*\{\s*seconds\s*:\s*(\d+)/);
+    const flatValue = content.match(/last_user_view_time\s*:\s*(\d+)/);
+
+    if (nestedSeconds) {
+      lastUserViewTime = parseInt(nestedSeconds[1], 10) * 1000;
+    } else if (flatValue) {
+      lastUserViewTime = parseInt(flatValue[1], 10) * 1000;
     }
 
     return {

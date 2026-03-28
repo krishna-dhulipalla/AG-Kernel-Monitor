@@ -1,209 +1,120 @@
 /**
- * Log tailer — tails the Antigravity.log file for live session data.
- *
- * Parses:
- *   - planner_generator.go:283 → message count per turn
- *   - interceptor.go:74 → active conversation UUID
- *   - http_helpers.go:123 → API call activity
- *
- * Updates SQLite conversations.message_count on each parsed line.
+ * Log tailer — tails Antigravity.log for active-session runtime signals.
  */
 
-import { existsSync, readdirSync, statSync, readFileSync, watchFile } from "fs";
-import { join } from "path";
+import { existsSync, readFileSync, statSync, watchFile } from "fs";
 import chalk from "chalk";
 import type { MonitorDB } from "../db/schema";
-import { getLogDir } from "../paths";
+import type { AgKernelConfig } from "../config";
+import { estimateConversationMetrics, formatRatio, formatTokens } from "../metrics/estimator";
+import { takeSnapshotIfChanged } from "../metrics/snapshotter";
+import { findLatestLogFile, parseLogLine } from "../runtime/log-signals";
 
-interface LogState {
+interface LogTailState {
   filePath: string;
   offset: number;
   currentConversationId: string | null;
 }
 
-/**
- * Find the current (latest) Antigravity.log file.
- *
- * Log path structure:
- *   %APPDATA%/Antigravity/logs/<date>/window1/exthost/google.antigravity/Antigravity.log
- */
-function findLatestLogFile(): string | null {
-  const logDir = getLogDir();
+export function startLogTailer(db: MonitorDB, config: AgKernelConfig): void {
+  const logFilePath = findLatestLogFile();
 
-  if (!existsSync(logDir)) return null;
-
-  try {
-    // Find the latest date directory
-    const dateDirs = readdirSync(logDir, { withFileTypes: true })
-      .filter((d) => d.isDirectory())
-      .map((d) => ({
-        name: d.name,
-        path: join(logDir, d.name),
-      }))
-      .sort((a, b) => b.name.localeCompare(a.name)); // Newest first
-
-    for (const dateDir of dateDirs) {
-      // Search recursively for Antigravity.log
-      const logFile = findLogFileRecursive(dateDir.path);
-      if (logFile) return logFile;
-    }
-  } catch {
-    // Ignore errors
-  }
-
-  return null;
-}
-
-/**
- * Recursively search for Antigravity.log file.
- */
-function findLogFileRecursive(dir: string): string | null {
-  try {
-    const entries = readdirSync(dir, { withFileTypes: true });
-
-    for (const entry of entries) {
-      const fullPath = join(dir, entry.name);
-      if (entry.isFile() && entry.name === "Antigravity.log") {
-        return fullPath;
-      }
-      if (entry.isDirectory()) {
-        const found = findLogFileRecursive(fullPath);
-        if (found) return found;
-      }
-    }
-  } catch {
-    // Ignore
-  }
-
-  return null;
-}
-
-/**
- * Parse relevant log lines.
- */
-interface ParsedLogLine {
-  type: "message_count" | "conversation_id" | "api_call";
-  value: string | number;
-  raw: string;
-}
-
-function parseLogLine(line: string): ParsedLogLine | null {
-  // planner_generator.go:283] Requesting planner with N chat messages
-  const msgMatch = line.match(/planner_generator\.go:\d+\]\s*Requesting planner with (\d+) chat messages/);
-  if (msgMatch) {
-    return { type: "message_count", value: parseInt(msgMatch[1], 10), raw: line };
-  }
-
-  // interceptor.go:74] → conversation UUID
-  const convMatch = line.match(/interceptor\.go:\d+\].*?([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i);
-  if (convMatch) {
-    return { type: "conversation_id", value: convMatch[1], raw: line };
-  }
-
-  // http_helpers.go:123] → API call activity
-  const apiMatch = line.match(/http_helpers\.go:\d+\]/);
-  if (apiMatch) {
-    return { type: "api_call", value: "active", raw: line };
-  }
-
-  return null;
-}
-
-/**
- * Start tailing the Antigravity.log file.
- */
-export function startLogTailer(db: MonitorDB): void {
-  const logFile = findLatestLogFile();
-
-  if (!logFile) {
-    console.log(chalk.dim("   Log tailer: no Antigravity.log found (will monitor on next restart)"));
+  if (!logFilePath || !existsSync(logFilePath)) {
+    console.log(chalk.dim("   Log tailer: no Antigravity.log found"));
     return;
   }
 
-  console.log(chalk.dim(`   Tailing: ${logFile}`));
+  console.log(chalk.dim(`   Tailing: ${logFilePath}`));
 
-  const state: LogState = {
-    filePath: logFile,
-    offset: 0,
+  const state: LogTailState = {
+    filePath: logFilePath,
+    offset: statSync(logFilePath).size,
     currentConversationId: null,
   };
 
-  // Start from the end of the file (we only want new lines)
-  try {
-    state.offset = statSync(logFile).size;
-  } catch {
-    state.offset = 0;
-  }
-
-  // Watch for changes
-  const POLL_INTERVAL_MS = 1000;
-  watchFile(logFile, { interval: POLL_INTERVAL_MS }, () => {
-    processNewLines(db, state);
+  watchFile(logFilePath, { interval: 1000 }, () => {
+    processNewLines(db, config, state);
   });
 }
 
-/**
- * Read and process new lines since last offset.
- */
-function processNewLines(db: MonitorDB, state: LogState): void {
+function processNewLines(db: MonitorDB, config: AgKernelConfig, state: LogTailState): void {
   try {
     const stats = statSync(state.filePath);
+    if (stats.size < state.offset) {
+      state.offset = 0;
+    }
     if (stats.size <= state.offset) {
-      if (stats.size < state.offset) {
-        // File was truncated/rotated — reset offset
-        state.offset = 0;
-      }
       return;
     }
 
-    // Read new bytes
     const content = readFileSync(state.filePath, "utf-8");
     const newContent = content.slice(state.offset);
     state.offset = stats.size;
 
-    const lines = newContent.split("\n").filter((l) => l.trim());
-
-    for (const line of lines) {
+    for (const line of newContent.split(/\r?\n/)) {
+      if (!line.trim()) continue;
       const parsed = parseLogLine(line);
       if (!parsed) continue;
 
-      switch (parsed.type) {
-        case "conversation_id":
-          state.currentConversationId = String(parsed.value);
-          break;
-
-        case "message_count":
-          if (state.currentConversationId) {
-            const conv = db.getConversation(state.currentConversationId);
-            const newCount = parsed.value as number;
-
-            if (conv) {
-              const oldCount = conv.message_count;
-              db.upsertConversation({
-                ...conv,
-                message_count: newCount,
-              });
-
-              if (oldCount !== null && newCount > oldCount) {
-                const timestamp = new Date().toLocaleTimeString();
-                console.log(
-                  chalk.dim(`[${timestamp}]`) +
-                  chalk.magenta(` [LIVE]`) +
-                  ` Session ${state.currentConversationId.slice(0, 12)}... ` +
-                  `now at ${chalk.bold(String(newCount))} messages ` +
-                  chalk.dim(`(+${newCount - oldCount} since start)`)
-                );
-              }
-            }
-          }
-          break;
-
-        case "api_call":
-          // Track API activity (could be expanded)
-          break;
+      if (parsed.type === "conversation_id") {
+        state.currentConversationId = String(parsed.value);
+        continue;
       }
+
+      if (parsed.type !== "message_count" || !state.currentConversationId) {
+        continue;
+      }
+
+      const conversation = db.getConversation(state.currentConversationId);
+      if (!conversation) {
+        continue;
+      }
+
+      const newCount = parsed.value as number;
+      const metrics = estimateConversationMetrics({
+        pbFileBytes: conversation.pb_file_bytes,
+        brainFolderBytes: conversation.brain_folder_bytes,
+        messageCount: newCount,
+        resolvedVersionCount: conversation.resolved_version_count,
+        bytesPerToken: config.bytesPerToken,
+      });
+
+      const updatedConversation = {
+        ...conversation,
+        message_count: newCount,
+        message_count_source: "log",
+        estimated_prompt_tokens: metrics.estimatedPromptTokens,
+        estimated_artifact_tokens: metrics.estimatedArtifactTokens,
+        estimated_tokens: metrics.estimatedTotalTokens,
+        last_active_at: parsed.timestamp ? new Date(parsed.timestamp.replace(" ", "T")).toISOString() : conversation.last_active_at,
+        activity_source: "log",
+        is_active: 1,
+      };
+
+      db.clearActiveConversation();
+      db.upsertConversation(updatedConversation);
+      takeSnapshotIfChanged(db, updatedConversation);
+
+      if (updatedConversation.workspace_id) {
+        db.updateWorkspaceAggregates(updatedConversation.workspace_id);
+      }
+
+      const deltaMessages = conversation.message_count !== null ? newCount - conversation.message_count : null;
+      const ratio = config.bloatLimit > 0 ? updatedConversation.estimated_tokens / config.bloatLimit : 0;
+      const timestamp = new Date().toLocaleTimeString();
+      const deltaLabel = deltaMessages !== null ? ` (+${deltaMessages} since last)` : "";
+      const title = updatedConversation.title ? ` ${chalk.dim(`"${updatedConversation.title}"`)}` : "";
+
+      console.log(
+        chalk.dim(`[${timestamp}]`) +
+        chalk.magenta(" [LIVE]") +
+        ` ${updatedConversation.id.slice(0, 12)}...${title}` +
+        ` now at ${chalk.bold(String(newCount))} direct messages${deltaLabel}` +
+        ` → ${formatTokens(updatedConversation.estimated_tokens)} estimated tokens` +
+        ` (${formatRatio(ratio)} of limit)`
+      );
     }
   } catch {
-    // Silently ignore transient read errors
+    // Ignore transient watcher read failures.
   }
 }

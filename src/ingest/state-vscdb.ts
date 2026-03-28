@@ -1,21 +1,21 @@
 /**
- * Query the global state.vscdb (SQLite) for Antigravity state data.
+ * Query and decode the global state.vscdb (SQLite) for Antigravity state data.
  *
- * Extracts from ItemTable:
- *   - antigravityUnifiedStateSync.trajectorySummaries → conversation metadata
- *   - chat.ChatSessionStore.index → chat session → workspace mapping
- *   - antigravityUnifiedStateSync.modelCredits → credit usage
- *   - antigravityUnifiedStateSync.modelPreferences → current model selection
+ * The important keys are not plain JSON on current Antigravity builds. Some are
+ * JSON, while others are base64-wrapped binary payloads that still contain
+ * recoverable human-readable strings such as conversation titles and workspace
+ * URIs. This module intentionally uses a deterministic extractor instead of
+ * assuming one fixed serialization format.
  */
 
 import { Database } from "bun:sqlite";
 import { existsSync } from "fs";
 import { getGlobalStateDbPath } from "../paths";
+import { findFileUrisInText, normalizeWorkspaceUri } from "../uri-utils";
 
 export interface ChatSessionEntry {
   sessionId: string;
   workspaceUri?: string;
-  workspaceFolder?: string;
   title?: string;
   lastModified?: string;
 }
@@ -26,6 +26,8 @@ export interface TrajectorySummary {
   messageCount?: number;
   lastActivity?: string;
   workspaceUri?: string;
+  workspaceUris: string[];
+  rawSnippet?: string;
 }
 
 export interface ModelCredits {
@@ -35,49 +37,327 @@ export interface ModelCredits {
   raw: unknown;
 }
 
+export interface DecodedStateValue {
+  raw: string;
+  parsedJson: unknown | null;
+  decodedText: string;
+  base64Decoded: boolean;
+}
+
 export interface StateVscdbResult {
   chatSessions: ChatSessionEntry[];
   trajectories: TrajectorySummary[];
   modelCredits: ModelCredits | null;
-  modelPreferences: Record<string, unknown> | null;
-  /** Map from conversation/session ID → workspace URI, built from all available data */
+  modelPreferences: Record<string, unknown> | string | null;
   sessionToWorkspace: Map<string, string>;
 }
 
-/**
- * Safely read a key from the ItemTable in state.vscdb.
- * Values are stored as BLOBs — typically JSON-serialized strings.
- */
-function readItemTableValue(db: Database, key: string): unknown | null {
+const UUID_REGEX = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/ig;
+const BASE64_REGEX = /(?:[A-Za-z0-9+/]{24,}={0,2})/g;
+const TITLE_REGEX = /([A-Z][A-Za-z0-9&/()'.,:_-]*(?: [A-Za-z0-9&/()'.,:_-]+){1,12})/;
+
+function readItemTableRawValue(db: Database, key: string): string | null {
   try {
-    const row = db.query("SELECT value FROM ItemTable WHERE key = ?1").get(key) as { value: Buffer | string } | null;
+    const row = db.query("SELECT value FROM ItemTable WHERE key = ?1").get(key) as { value: Buffer | string | Uint8Array } | null;
     if (!row) return null;
 
-    let str: string;
-    if (Buffer.isBuffer(row.value)) {
-      str = row.value.toString("utf-8");
-    } else if (typeof row.value === "string") {
-      str = row.value;
-    } else if (row.value instanceof Uint8Array) {
-      str = new TextDecoder().decode(row.value);
-    } else {
-      return null;
-    }
-
-    try {
-      return JSON.parse(str);
-    } catch {
-      // Not JSON — return raw string
-      return str;
-    }
+    if (typeof row.value === "string") return row.value;
+    if (Buffer.isBuffer(row.value)) return row.value.toString("utf-8");
+    if (row.value instanceof Uint8Array) return new TextDecoder().decode(row.value);
+    return null;
   } catch {
     return null;
   }
 }
 
-/**
- * List all keys in the ItemTable (useful for discovery).
- */
+function tryParseJson(raw: string): unknown | null {
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
+function isLikelyBase64(raw: string): boolean {
+  const trimmed = raw.trim();
+  return trimmed.length >= 16
+    && trimmed.length % 4 === 0
+    && /^[A-Za-z0-9+/=\r\n]+$/.test(trimmed);
+}
+
+function toPrintableText(input: string): string {
+  return input.replace(/[^\x20-\x7E\r\n\t]+/g, " ");
+}
+
+function decodeBase64Printable(candidate: string): string {
+  return toPrintableText(Buffer.from(candidate, "base64").toString("utf-8")).trim();
+}
+
+function scoreDecodedText(text: string): number {
+  let score = 0;
+  score += (text.match(/file:\/\/\/|https?:\/\//g) ?? []).length * 20;
+  score += (text.match(/[A-Za-z]{4,}/g) ?? []).length;
+  if (/\{\".+/.test(text)) score += 10;
+  return score;
+}
+
+function sanitizeTitle(title: string): string {
+  return title
+    .replace(/^[^A-Za-z0-9]+/, "")
+    .replace(/\s+\$?$/, "")
+    .replace(/\s+[A-Za-z]$/, "")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+}
+
+function isUsableTitle(title: string): boolean {
+  if (title.length < 6) return false;
+  if (UUID_REGEX.test(title)) return false;
+  UUID_REGEX.lastIndex = 0;
+  if (/notify_user/i.test(title)) return false;
+  if (/^(mainR|masterR)/i.test(title)) return false;
+  if (/tokens truncated/i.test(title)) return false;
+  if (/[{}]/.test(title)) return false;
+
+  const words = title.match(/[A-Za-z]{3,}/g) ?? [];
+  return words.length >= 2;
+}
+
+function decodeNestedPayloads(segment: string): string[] {
+  const decoded: string[] = [];
+  const seen = new Set<string>();
+
+  for (const match of segment.matchAll(BASE64_REGEX)) {
+    const candidate = match[0];
+    if (candidate.length < 24 || candidate.length > 16_000) continue;
+
+    try {
+      const variants = [candidate];
+      if (candidate.length > 25) {
+        variants.push(candidate.slice(1));
+      }
+
+      let printable = "";
+      let bestScore = -1;
+
+      for (const variant of variants) {
+        const decoded = decodeBase64Printable(variant);
+        const score = scoreDecodedText(decoded);
+        if (score > bestScore) {
+          printable = decoded;
+          bestScore = score;
+        }
+      }
+
+      if (!printable || printable.length < 8) continue;
+      if (!/(file:\/\/\/|https?:\/\/|[A-Za-z]{4,} [A-Za-z]{4,}|\{\".+)/.test(printable)) continue;
+      if (seen.has(printable)) continue;
+      seen.add(printable);
+      decoded.push(printable);
+    } catch {
+      continue;
+    }
+  }
+
+  return decoded;
+}
+
+function extractTitle(segment: string, nestedPayloads: string[], conversationId: string): string | undefined {
+  const sources = [...nestedPayloads, toPrintableText(segment)];
+
+  for (const source of sources) {
+    const prefix = source.split(conversationId)[0] ?? source;
+    const quoteMatch = prefix.match(/"([^"]{6,120})"/);
+    if (quoteMatch) {
+      const title = sanitizeTitle(quoteMatch[1]);
+      if (isUsableTitle(title) && !/^(file:\/\/|https?:\/\/)/i.test(title)) {
+        return title;
+      }
+    }
+
+    const titleMatch = prefix.match(TITLE_REGEX);
+    if (titleMatch) {
+      const title = sanitizeTitle(titleMatch[1]);
+      if (isUsableTitle(title) && !/^(file:\/\/|https?:\/\/)/i.test(title)) {
+        return title;
+      }
+    }
+  }
+
+  return undefined;
+}
+
+function extractMessageCount(text: string): number | undefined {
+  const directMatch = text.match(/(?:messageCount|chat messages?)["\s:=-]+(\d{1,5})/i);
+  if (directMatch) {
+    return parseInt(directMatch[1], 10);
+  }
+
+  return undefined;
+}
+
+export function decodeStateValue(raw: string): DecodedStateValue {
+  const parsedJson = tryParseJson(raw);
+  if (parsedJson !== null) {
+    return {
+      raw,
+      parsedJson,
+      decodedText: raw,
+      base64Decoded: false,
+    };
+  }
+
+  if (isLikelyBase64(raw)) {
+    try {
+      return {
+        raw,
+        parsedJson: null,
+        decodedText: Buffer.from(raw, "base64").toString("utf-8"),
+        base64Decoded: true,
+      };
+    } catch {
+      // Fall through to raw text.
+    }
+  }
+
+  return {
+    raw,
+    parsedJson: null,
+    decodedText: raw,
+    base64Decoded: false,
+  };
+}
+
+function extractTrajectoriesFromJson(value: unknown): TrajectorySummary[] {
+  const entries = Array.isArray(value)
+    ? value
+    : typeof value === "object" && value !== null
+      ? Object.entries(value as Record<string, unknown>).map(([key, entry]) => ({
+          conversationId: key,
+          ...(typeof entry === "object" && entry !== null ? entry : {}),
+        }))
+      : [];
+
+  const results: TrajectorySummary[] = [];
+
+  for (const entry of entries) {
+    if (!entry || typeof entry !== "object") continue;
+    const record = entry as Record<string, unknown>;
+    const conversationId = String(record.conversationId || record.id || "");
+    if (!conversationId) continue;
+
+    const workspaceUri = normalizeWorkspaceUri(
+      typeof record.workspaceUri === "string" ? record.workspaceUri : undefined
+    );
+
+    results.push({
+      conversationId,
+      title: typeof record.title === "string" ? record.title : undefined,
+      messageCount: typeof record.messageCount === "number" ? record.messageCount : undefined,
+      lastActivity: typeof record.lastActivity === "string" ? record.lastActivity : undefined,
+      workspaceUri: workspaceUri ?? undefined,
+      workspaceUris: workspaceUri ? [workspaceUri] : [],
+      rawSnippet: undefined,
+    });
+  }
+
+  return results;
+}
+
+export function extractTrajectorySummariesFromEncodedText(text: string): TrajectorySummary[] {
+  const matches = Array.from(text.matchAll(UUID_REGEX));
+  const results: TrajectorySummary[] = [];
+
+  for (let index = 0; index < matches.length; index++) {
+    const current = matches[index];
+    const conversationId = current[0];
+    const currentIndex = current.index ?? 0;
+    const nextIndex = matches[index + 1]?.index ?? text.length;
+    const previousBoundary = matches[index - 1]
+      ? ((matches[index - 1].index ?? 0) + matches[index - 1][0].length)
+      : 0;
+
+    const start = Math.max(previousBoundary, currentIndex - 160);
+    const end = Math.min(nextIndex, currentIndex + 4_000);
+    const segment = text.slice(start, end);
+    const nestedPayloads = decodeNestedPayloads(segment);
+    const combinedText = [toPrintableText(segment), ...nestedPayloads].join("\n");
+    const workspaceUris = findFileUrisInText(combinedText);
+    const usefulWorkspaceUris = workspaceUris.filter((uri) => !uri.includes("/.gemini/antigravity/brain/"));
+    const workspaceUri = usefulWorkspaceUris[0] ?? workspaceUris[0];
+    const title = extractTitle(segment, nestedPayloads, conversationId);
+    const messageCount = extractMessageCount(combinedText);
+
+    results.push({
+      conversationId,
+      title,
+      messageCount,
+      workspaceUri,
+      workspaceUris: usefulWorkspaceUris.length > 0 ? usefulWorkspaceUris : workspaceUris,
+      rawSnippet: combinedText.slice(0, 800),
+    });
+  }
+
+  return results;
+}
+
+function extractChatSessions(value: unknown): ChatSessionEntry[] {
+  if (!value || typeof value !== "object") {
+    return [];
+  }
+
+  const root = value as Record<string, unknown>;
+  const rawEntries = Array.isArray(root.entries)
+    ? root.entries
+    : root.entries && typeof root.entries === "object"
+      ? Object.values(root.entries as Record<string, unknown>)
+      : Array.isArray(value)
+        ? (value as unknown[])
+        : Object.values(root);
+
+  const sessions: ChatSessionEntry[] = [];
+
+  for (const entry of rawEntries) {
+    if (!entry || typeof entry !== "object") continue;
+    const record = entry as Record<string, unknown>;
+    const sessionId = String(record.sessionId || record.id || "");
+    if (!sessionId) continue;
+
+    const workspaceUri = normalizeWorkspaceUri(
+      typeof record.workspaceUri === "string"
+        ? record.workspaceUri
+        : typeof record.workspaceFolder === "string"
+          ? record.workspaceFolder
+          : typeof record.folder === "string"
+            ? record.folder
+            : undefined
+    );
+
+    sessions.push({
+      sessionId,
+      workspaceUri: workspaceUri ?? undefined,
+      title: typeof record.title === "string" ? record.title : undefined,
+      lastModified: typeof record.lastModified === "string"
+        ? record.lastModified
+        : typeof record.updatedAt === "string"
+          ? record.updatedAt
+          : undefined,
+    });
+  }
+
+  return sessions;
+}
+
+function decodeObjectLikeValue(raw: string): Record<string, unknown> | string | null {
+  const decoded = decodeStateValue(raw);
+  if (decoded.parsedJson && typeof decoded.parsedJson === "object") {
+    return decoded.parsedJson as Record<string, unknown>;
+  }
+
+  const printable = toPrintableText(decoded.decodedText).trim();
+  return printable || null;
+}
+
 export function listStateKeys(customPath?: string): string[] {
   const dbPath = customPath || getGlobalStateDbPath();
   if (!existsSync(dbPath)) return [];
@@ -85,15 +365,12 @@ export function listStateKeys(customPath?: string): string[] {
   const db = new Database(dbPath, { readonly: true });
   try {
     const rows = db.query("SELECT key FROM ItemTable ORDER BY key").all() as { key: string }[];
-    return rows.map((r) => r.key);
+    return rows.map((row) => row.key);
   } finally {
     db.close();
   }
 }
 
-/**
- * Parse the global state.vscdb for chat sessions, trajectories, credits, and preferences.
- */
 export function parseStateVscdb(customPath?: string): StateVscdbResult | null {
   const dbPath = customPath || getGlobalStateDbPath();
 
@@ -106,96 +383,65 @@ export function parseStateVscdb(customPath?: string): StateVscdbResult | null {
   try {
     db = new Database(dbPath, { readonly: true });
   } catch (err) {
-    console.error(`❌ Failed to open state.vscdb:`, err);
+    console.error("❌ Failed to open state.vscdb:", err);
     return null;
   }
 
   try {
     const sessionToWorkspace = new Map<string, string>();
 
-    // ── Chat Session Store Index ──
-    const chatSessions: ChatSessionEntry[] = [];
-    const chatIndex = readItemTableValue(db, "chat.ChatSessionStore.index");
-    if (chatIndex && typeof chatIndex === "object") {
-      // chatIndex can be an array or an object with session keys
-      const entries = Array.isArray(chatIndex)
-        ? chatIndex
-        : Object.values(chatIndex);
-
-      for (const entry of entries) {
-        if (!entry || typeof entry !== "object") continue;
-        const e = entry as Record<string, unknown>;
-
-        const sessionId = String(e.sessionId || e.id || "");
-        if (!sessionId) continue;
-
-        const wsUri = String(e.workspaceUri || e.workspaceFolder || e.folder || "");
-        const session: ChatSessionEntry = {
-          sessionId,
-          workspaceUri: wsUri || undefined,
-          workspaceFolder: String(e.workspaceFolder || ""),
-          title: String(e.title || ""),
-          lastModified: String(e.lastModified || e.updatedAt || ""),
-        };
-
-        chatSessions.push(session);
-
-        if (wsUri) {
-          sessionToWorkspace.set(sessionId, wsUri);
-        }
+    const chatIndexRaw = readItemTableRawValue(db, "chat.ChatSessionStore.index");
+    const chatSessions = chatIndexRaw ? extractChatSessions(decodeStateValue(chatIndexRaw).parsedJson) : [];
+    for (const session of chatSessions) {
+      if (session.workspaceUri) {
+        sessionToWorkspace.set(session.sessionId, session.workspaceUri);
       }
     }
 
-    // ── Trajectory Summaries ──
-    const trajectories: TrajectorySummary[] = [];
-    const trajRaw = readItemTableValue(db, "antigravityUnifiedStateSync.trajectorySummaries");
-    if (trajRaw && typeof trajRaw === "object") {
-      const entries = Array.isArray(trajRaw)
-        ? trajRaw
-        : Object.entries(trajRaw).map(([k, v]) => ({ conversationId: k, ...(v as object) }));
+    const trajectoriesRaw = readItemTableRawValue(db, "antigravityUnifiedStateSync.trajectorySummaries");
+    let trajectories: TrajectorySummary[] = [];
+    if (trajectoriesRaw) {
+      const decoded = decodeStateValue(trajectoriesRaw);
+      trajectories = decoded.parsedJson !== null
+        ? extractTrajectoriesFromJson(decoded.parsedJson)
+        : extractTrajectorySummariesFromEncodedText(decoded.decodedText);
+    }
 
-      for (const entry of entries) {
-        if (!entry || typeof entry !== "object") continue;
-        const e = entry as Record<string, unknown>;
-
-        const convId = String(e.conversationId || e.id || "");
-        if (!convId) continue;
-
-        trajectories.push({
-          conversationId: convId,
-          title: e.title ? String(e.title) : undefined,
-          messageCount: typeof e.messageCount === "number" ? e.messageCount : undefined,
-          lastActivity: e.lastActivity ? String(e.lastActivity) : undefined,
-          workspaceUri: e.workspaceUri ? String(e.workspaceUri) : undefined,
-        });
-
-        if (e.workspaceUri) {
-          sessionToWorkspace.set(convId, String(e.workspaceUri));
-        }
+    for (const trajectory of trajectories) {
+      if (trajectory.workspaceUri) {
+        sessionToWorkspace.set(trajectory.conversationId, trajectory.workspaceUri);
       }
     }
 
-    // ── Model Credits ──
+    const creditsRaw = readItemTableRawValue(db, "antigravityUnifiedStateSync.modelCredits");
+    const creditsValue = creditsRaw ? decodeObjectLikeValue(creditsRaw) : null;
     let modelCredits: ModelCredits | null = null;
-    const creditsRaw = readItemTableValue(db, "antigravityUnifiedStateSync.modelCredits");
-    if (creditsRaw && typeof creditsRaw === "object") {
-      const c = creditsRaw as Record<string, unknown>;
+    if (creditsValue && typeof creditsValue === "object") {
+      const record = creditsValue as Record<string, unknown>;
       modelCredits = {
-        used: typeof c.used === "number" ? c.used : 0,
-        total: typeof c.total === "number" ? c.total : 0,
-        resetDate: c.resetDate ? String(c.resetDate) : undefined,
-        raw: creditsRaw,
+        used: typeof record.used === "number" ? record.used : 0,
+        total: typeof record.total === "number" ? record.total : 0,
+        resetDate: typeof record.resetDate === "string" ? record.resetDate : undefined,
+        raw: creditsValue,
+      };
+    } else if (creditsValue) {
+      modelCredits = {
+        used: 0,
+        total: 0,
+        raw: creditsValue,
       };
     }
 
-    // ── Model Preferences ──
-    let modelPreferences: Record<string, unknown> | null = null;
-    const prefsRaw = readItemTableValue(db, "antigravityUnifiedStateSync.modelPreferences");
-    if (prefsRaw && typeof prefsRaw === "object") {
-      modelPreferences = prefsRaw as Record<string, unknown>;
-    }
+    const modelPreferencesRaw = readItemTableRawValue(db, "antigravityUnifiedStateSync.modelPreferences");
+    const modelPreferences = modelPreferencesRaw ? decodeObjectLikeValue(modelPreferencesRaw) : null;
 
-    return { chatSessions, trajectories, modelCredits, modelPreferences, sessionToWorkspace };
+    return {
+      chatSessions,
+      trajectories,
+      modelCredits,
+      modelPreferences,
+      sessionToWorkspace,
+    };
   } finally {
     db.close();
   }

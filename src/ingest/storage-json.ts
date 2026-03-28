@@ -9,10 +9,12 @@
 
 import { readFileSync, existsSync } from "fs";
 import { getStorageJsonPath } from "../paths";
+import { extractWorkspaceNameFromUri, normalizeWorkspaceUri } from "../uri-utils";
 
 export interface WorkspaceEntry {
   hash: string;
   uri: string;
+  normalizedUri: string;
   name: string;
 }
 
@@ -32,20 +34,6 @@ export interface SidebarWorkspace {
 export interface ScratchWorkspace {
   uri: string;
   name: string;
-}
-
-/**
- * Extract workspace name from URI.
- * e.g., "file:///c%3A/Users/vamsi/Projects/MyApp" → "MyApp"
- */
-function extractNameFromUri(uri: string): string {
-  try {
-    const decoded = decodeURIComponent(uri);
-    const parts = decoded.replace(/\/$/, "").split("/");
-    return parts[parts.length - 1] || decoded;
-  } catch {
-    return uri;
-  }
 }
 
 /**
@@ -77,10 +65,13 @@ export function parseStorageJson(customPath?: string): StorageJsonResult | null 
       for (const [uri, profileId] of Object.entries(wsMap)) {
         // The key is the workspace URI, the value is the profile ID
         const hash = generateWorkspaceHash(uri);
+        const normalizedUri = normalizeWorkspaceUri(uri);
+        if (!normalizedUri) continue;
         workspaces.push({
           hash,
           uri,
-          name: extractNameFromUri(uri),
+          normalizedUri,
+          name: extractWorkspaceNameFromUri(uri),
         });
       }
     }
@@ -96,7 +87,7 @@ export function parseStorageJson(customPath?: string): StorageJsonResult | null 
         if (entry && typeof entry === "object" && "uri" in entry) {
           sidebarWorkspaces.push({
             uri: String(entry.uri),
-            name: extractNameFromUri(String(entry.uri)),
+            name: extractWorkspaceNameFromUri(String(entry.uri)),
             isActive: Boolean(entry.isActive),
           });
         }
@@ -109,7 +100,7 @@ export function parseStorageJson(customPath?: string): StorageJsonResult | null 
             if (entry && typeof entry === "object" && "uri" in entry) {
               sidebarWorkspaces.push({
                 uri: String(entry.uri),
-                name: extractNameFromUri(String(entry.uri)),
+                name: extractWorkspaceNameFromUri(String(entry.uri)),
                 isActive: Boolean(entry.isActive),
               });
             }
@@ -130,7 +121,7 @@ export function parseStorageJson(customPath?: string): StorageJsonResult | null 
         if (entry && typeof entry === "object" && "uri" in entry) {
           scratchWorkspaces.push({
             uri: String(entry.uri),
-            name: extractNameFromUri(String(entry.uri)),
+            name: extractWorkspaceNameFromUri(String(entry.uri)),
           });
         }
       }
@@ -142,7 +133,7 @@ export function parseStorageJson(customPath?: string): StorageJsonResult | null 
             if (entry && typeof entry === "object" && "uri" in entry) {
               scratchWorkspaces.push({
                 uri: String(entry.uri),
-                name: extractNameFromUri(String(entry.uri)),
+                name: extractWorkspaceNameFromUri(String(entry.uri)),
               });
             }
           }

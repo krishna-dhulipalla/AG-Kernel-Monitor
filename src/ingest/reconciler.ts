@@ -1,24 +1,22 @@
 /**
- * Data reconciler — orchestrates all ingestion modules.
- *
- * Merges workspace mappings from all sources:
- *   1. storage.json (wins conflicts)
- *   2. state.vscdb ChatSessionStore.index
- *   3. workspace storage directory scan
- *   4. Brain folder file:// path extraction
- *
- * Writes complete data to SQLite: workspaces + conversations tables.
- * Takes initial snapshot into snapshots table.
+ * Data reconciler — orchestrates ingestion, mapping, and persistence.
  */
 
-import { parseStorageJson, type WorkspaceEntry } from "./storage-json";
-import { parseStateVscdb } from "./state-vscdb";
-import { scanWorkspaceStorage } from "./workspace-storage";
+import { type WorkspaceEntry, parseStorageJson } from "./storage-json";
+import { parseStateVscdb, type TrajectorySummary } from "./state-vscdb";
+import { type WorkspaceStorageEntry, scanWorkspaceStorage } from "./workspace-storage";
 import { scanConversations } from "../scanner/conversation-scanner";
 import { scanBrainFolders, type BrainScanEntry } from "../scanner/brain-scanner";
-import { MonitorDB, type Conversation } from "../db/schema";
-import { estimateTokens } from "../metrics/estimator";
+import { type Conversation, MonitorDB } from "../db/schema";
+import { estimateConversationMetrics } from "../metrics/estimator";
+import { takeSnapshotIfChanged } from "../metrics/snapshotter";
+import { scanLatestLogFile } from "../runtime/log-signals";
 import type { AgKernelConfig } from "../config";
+import {
+  extractWorkspaceNameFromUri,
+  normalizeWorkspaceUri,
+  uriMatchesWorkspaceRoot,
+} from "../uri-utils";
 
 export interface ReconcilerStats {
   workspacesFound: number;
@@ -32,22 +30,171 @@ export interface ReconcilerStats {
   totalBrainBytes: number;
 }
 
-/**
- * Extract workspace name from URI.
- */
-function extractNameFromUri(uri: string): string {
-  try {
-    const decoded = decodeURIComponent(uri);
-    const parts = decoded.replace(/\/$/, "").split("/");
-    return parts[parts.length - 1] || decoded;
-  } catch {
-    return uri;
-  }
+interface WorkspaceRegistryEntry {
+  id: string;
+  uri: string;
+  normalizedUri: string;
+  name: string;
 }
 
-/**
- * Run the full ingestion pipeline and populate the database.
- */
+interface MappingResult {
+  workspaceId: string;
+  workspaceUri: string;
+  mappingSource: string;
+  mappingConfidence: number;
+}
+
+const UNMAPPED_WORKSPACE_ID = "__unmapped__";
+const UNMAPPED_WORKSPACE_URI = "__unmapped__";
+
+function toIsoString(timestamp: string): string | null {
+  const date = new Date(timestamp.replace(" ", "T"));
+  return Number.isNaN(date.getTime()) ? null : date.toISOString();
+}
+
+function buildWorkspaceRegistry(
+  storageWorkspaces: WorkspaceEntry[],
+  workspaceStorageEntries: WorkspaceStorageEntry[],
+): Map<string, WorkspaceRegistryEntry> {
+  const registry = new Map<string, WorkspaceRegistryEntry>();
+
+  const addWorkspace = (entry: { hash: string; uri: string; normalizedUri: string; name: string }) => {
+    if (!entry.normalizedUri) return;
+    if (registry.has(entry.normalizedUri)) return;
+
+    registry.set(entry.normalizedUri, {
+      id: entry.hash,
+      uri: entry.uri,
+      normalizedUri: entry.normalizedUri,
+      name: entry.name || extractWorkspaceNameFromUri(entry.uri),
+    });
+  };
+
+  for (const workspace of storageWorkspaces) {
+    addWorkspace(workspace);
+  }
+
+  for (const workspace of workspaceStorageEntries) {
+    addWorkspace(workspace);
+  }
+
+  registry.set(UNMAPPED_WORKSPACE_URI, {
+    id: UNMAPPED_WORKSPACE_ID,
+    uri: UNMAPPED_WORKSPACE_URI,
+    normalizedUri: UNMAPPED_WORKSPACE_URI,
+    name: "[Unmapped]",
+  });
+
+  return registry;
+}
+
+function findWorkspaceMatch(
+  candidateUris: string[],
+  registry: Map<string, WorkspaceRegistryEntry>,
+  sourcePrefix: string,
+  exactConfidence: number,
+  prefixConfidence: number,
+): MappingResult | null {
+  for (const candidate of candidateUris) {
+    const normalizedCandidate = normalizeWorkspaceUri(candidate);
+    if (!normalizedCandidate) continue;
+
+    const exact = registry.get(normalizedCandidate);
+    if (exact && exact.id !== UNMAPPED_WORKSPACE_ID) {
+      return {
+        workspaceId: exact.id,
+        workspaceUri: exact.uri,
+        mappingSource: `${sourcePrefix}_exact`,
+        mappingConfidence: exactConfidence,
+      };
+    }
+
+    for (const workspace of registry.values()) {
+      if (workspace.id === UNMAPPED_WORKSPACE_ID) continue;
+      if (uriMatchesWorkspaceRoot(normalizedCandidate, workspace.normalizedUri)) {
+        return {
+          workspaceId: workspace.id,
+          workspaceUri: workspace.uri,
+          mappingSource: `${sourcePrefix}_prefix`,
+          mappingConfidence: prefixConfidence,
+        };
+      }
+    }
+  }
+
+  return null;
+}
+
+function findWorkspaceByTitleHint(
+  titleCandidates: Array<string | undefined>,
+  registry: Map<string, WorkspaceRegistryEntry>,
+): MappingResult | null {
+  const matches = new Map<string, WorkspaceRegistryEntry>();
+
+  for (const rawTitle of titleCandidates) {
+    const title = rawTitle?.trim();
+    if (!title) continue;
+
+    const normalizedTitle = title.toLowerCase();
+    for (const workspace of registry.values()) {
+      if (workspace.id === UNMAPPED_WORKSPACE_ID) continue;
+      const name = workspace.name.trim();
+      if (name.length < 4) continue;
+
+      if (normalizedTitle.includes(name.toLowerCase())) {
+        matches.set(workspace.id, workspace);
+      }
+    }
+  }
+
+  if (matches.size !== 1) {
+    return null;
+  }
+
+  const workspace = Array.from(matches.values())[0]!;
+  return {
+    workspaceId: workspace.id,
+    workspaceUri: workspace.uri,
+    mappingSource: "title_hint",
+    mappingConfidence: 0.55,
+  };
+}
+
+function chooseLastActive(
+  conversationId: string,
+  annotationTimestamp: number | null,
+  lastModified: Date,
+  logSignals: ReturnType<typeof scanLatestLogFile>,
+): { lastActiveAt: string; activitySource: string } {
+  const logTimestamp = logSignals.lastActivityAt.get(conversationId);
+  if (logTimestamp) {
+    const iso = toIsoString(logTimestamp);
+    if (iso) {
+      return { lastActiveAt: iso, activitySource: "log" };
+    }
+  }
+
+  if (annotationTimestamp) {
+    return {
+      lastActiveAt: new Date(annotationTimestamp).toISOString(),
+      activitySource: "annotation",
+    };
+  }
+
+  return {
+    lastActiveAt: lastModified.toISOString(),
+    activitySource: "filesystem",
+  };
+}
+
+function indexTrajectories(trajectories: TrajectorySummary[]): Map<string, TrajectorySummary> {
+  const map = new Map<string, TrajectorySummary>();
+  for (const trajectory of trajectories) {
+    map.set(trajectory.conversationId, trajectory);
+  }
+  return map;
+}
+
 export async function reconcile(db: MonitorDB, config: AgKernelConfig): Promise<ReconcilerStats> {
   const stats: ReconcilerStats = {
     workspacesFound: 0,
@@ -61,202 +208,130 @@ export async function reconcile(db: MonitorDB, config: AgKernelConfig): Promise<
     totalBrainBytes: 0,
   };
 
-  // ── 1. Build the workspace registry from all sources ──
-
-  // Primary: storage.json
   const storageResult = parseStorageJson();
-  const workspaceMap = new Map<string, { id: string; uri: string; name: string }>();
+  const workspaceStorageEntries = scanWorkspaceStorage();
+  const workspaceRegistry = buildWorkspaceRegistry(
+    storageResult?.workspaces ?? [],
+    workspaceStorageEntries,
+  );
 
-  if (storageResult) {
-    for (const ws of storageResult.workspaces) {
-      workspaceMap.set(ws.uri, {
-        id: ws.hash,
-        uri: ws.uri,
-        name: ws.name,
-      });
-    }
-
-    // Add sidebar workspaces that might not be in profileAssociations
-    for (const sw of storageResult.sidebarWorkspaces) {
-      if (!workspaceMap.has(sw.uri)) {
-        const hasher = new Bun.CryptoHasher("md5");
-        hasher.update(sw.uri);
-        workspaceMap.set(sw.uri, {
-          id: hasher.digest("hex"),
-          uri: sw.uri,
-          name: sw.name,
-        });
-      }
-    }
-  }
-
-  // Secondary: workspace storage directory scan
-  const wsStorageEntries = scanWorkspaceStorage();
-  for (const wse of wsStorageEntries) {
-    if (!workspaceMap.has(wse.uri)) {
-      workspaceMap.set(wse.uri, {
-        id: wse.hash,
-        uri: wse.uri,
-        name: wse.name,
-      });
-    }
-  }
-
-  // ── 2. Build conversation → workspace mapping ──
-
-  const convToWorkspace = new Map<string, string>(); // conversationId → workspace URI
-
-  // Primary: state.vscdb ChatSessionStore
   const stateResult = parseStateVscdb();
-  if (stateResult) {
-    for (const [sessionId, wsUri] of stateResult.sessionToWorkspace) {
-      convToWorkspace.set(sessionId, wsUri);
-    }
-  }
-
-  // ── 3. Scan conversations (.pb files) ──
+  const trajectoryByConversation = indexTrajectories(stateResult?.trajectories ?? []);
+  const logSignals = scanLatestLogFile();
 
   const conversations = scanConversations();
-  stats.conversationsTotal = conversations.length;
-
-  // ── 4. Scan brain folders ──
-
   const brainEntries = scanBrainFolders();
-  stats.brainFoldersFound = brainEntries.length;
+  const brainByConversation = new Map<string, BrainScanEntry>();
 
-  // Build a map for quick brain lookup
-  const brainMap = new Map<string, BrainScanEntry>();
-  for (const be of brainEntries) {
-    brainMap.set(be.conversationId, be);
-  }
-
-  // ── 5. Use brain folder file:// URIs as tertiary workspace mapping ──
-
-  for (const be of brainEntries) {
-    if (!convToWorkspace.has(be.conversationId) && be.workspaceUris.length > 0) {
-      // Try to match brain workspace URIs to known workspaces
-      for (const bUri of be.workspaceUris) {
-        for (const [wsUri] of workspaceMap) {
-          if (bUri.includes(extractNameFromUri(wsUri)) || wsUri.includes(extractNameFromUri(bUri))) {
-            convToWorkspace.set(be.conversationId, wsUri);
-            break;
-          }
-        }
-        if (convToWorkspace.has(be.conversationId)) break;
-      }
-    }
-  }
-
-  // ── 6. Persist workspaces ──
-
-  // Add a special "[Unmapped]" workspace for conversations without a workspace
-  const unmappedId = "__unmapped__";
-  workspaceMap.set("__unmapped__", {
-    id: unmappedId,
-    uri: "__unmapped__",
-    name: "[Unmapped]",
-  });
-
-  // Add a special "[Playground]" workspace for scratch workspaces
-  if (storageResult?.scratchWorkspaces && storageResult.scratchWorkspaces.length > 0) {
-    const playgroundId = "__playground__";
-    workspaceMap.set("__playground__", {
-      id: playgroundId,
-      uri: "__playground__",
-      name: "[Playground]",
-    });
+  for (const brainEntry of brainEntries) {
+    brainByConversation.set(brainEntry.conversationId, brainEntry);
   }
 
   const now = new Date().toISOString();
-  for (const [, ws] of workspaceMap) {
+  for (const workspace of workspaceRegistry.values()) {
     db.upsertWorkspace({
-      id: ws.id,
-      uri: ws.uri,
-      name: ws.name,
+      id: workspace.id,
+      uri: workspace.uri,
+      name: workspace.name,
       last_seen: now,
     });
   }
-  stats.workspacesFound = workspaceMap.size;
+  stats.workspacesFound = workspaceRegistry.size;
 
-  // ── 7. Persist conversations ──
+  const scannedConversationIds: string[] = [];
+  const activeConversationId = logSignals.activeConversationId;
 
-  const conversationIds = new Set<string>();
+  for (const conversationEntry of conversations) {
+    scannedConversationIds.push(conversationEntry.id);
+    const brain = brainByConversation.get(conversationEntry.id);
+    const trajectory = trajectoryByConversation.get(conversationEntry.id);
 
-  for (const conv of conversations) {
-    conversationIds.add(conv.id);
-    const brain = brainMap.get(conv.id);
+    const stateUris = trajectory?.workspaceUris ?? (trajectory?.workspaceUri ? [trajectory.workspaceUri] : []);
+    const brainUris = brain?.workspaceUris ?? [];
 
-    // Determine workspace
-    let workspaceId: string | null = null;
-    const wsUri = convToWorkspace.get(conv.id);
-    if (wsUri && workspaceMap.has(wsUri)) {
-      workspaceId = workspaceMap.get(wsUri)!.id;
-      stats.conversationsMapped++;
-    } else {
-      workspaceId = unmappedId;
+    const mapping = findWorkspaceMatch(stateUris, workspaceRegistry, "state_vscdb", 1.0, 0.92)
+      ?? findWorkspaceMatch(brainUris, workspaceRegistry, "brain_artifact", 0.8, 0.72)
+      ?? findWorkspaceByTitleHint([trajectory?.title, brain?.title], workspaceRegistry)
+      ?? {
+        workspaceId: UNMAPPED_WORKSPACE_ID,
+        workspaceUri: UNMAPPED_WORKSPACE_URI,
+        mappingSource: "unmapped",
+        mappingConfidence: 0,
+      };
+
+    if (mapping.workspaceId === UNMAPPED_WORKSPACE_ID) {
       stats.conversationsUnmapped++;
+    } else {
+      stats.conversationsMapped++;
     }
 
-    // Get message count from trajectories
-    let messageCount: number | null = null;
-    if (stateResult) {
-      const traj = stateResult.trajectories.find((t) => t.conversationId === conv.id);
-      if (traj?.messageCount) {
-        messageCount = traj.messageCount;
-      }
-    }
+    const directMessageCount = logSignals.messageCounts.get(conversationEntry.id);
+    const messageCount = directMessageCount ?? trajectory?.messageCount ?? null;
+    const messageCountSource = directMessageCount !== undefined
+      ? "log"
+      : trajectory?.messageCount !== undefined
+        ? "state_vscdb"
+        : null;
 
-    const conversation: Conversation = {
-      id: conv.id,
-      workspace_id: workspaceId,
-      pb_file_bytes: conv.pbFileBytes,
+    const activity = chooseLastActive(
+      conversationEntry.id,
+      conversationEntry.annotationTimestamp,
+      conversationEntry.lastModified,
+      logSignals,
+    );
+
+    const metrics = estimateConversationMetrics({
+      pbFileBytes: conversationEntry.pbFileBytes,
+      brainFolderBytes: brain?.totalBytes ?? 0,
+      messageCount,
+      resolvedVersionCount: brain?.resolvedVersionCount ?? 0,
+      bytesPerToken: config.bytesPerToken,
+    });
+
+    const canonicalConversation: Conversation = {
+      id: conversationEntry.id,
+      workspace_id: mapping.workspaceId,
+      title: trajectory?.title ?? brain?.title ?? null,
+      pb_file_bytes: conversationEntry.pbFileBytes,
       brain_folder_bytes: brain?.totalBytes ?? 0,
       brain_artifact_count: brain?.artifactCount ?? 0,
       resolved_version_count: brain?.resolvedVersionCount ?? 0,
       message_count: messageCount,
-      estimated_tokens: estimateTokens({
-        pbFileBytes: conv.pbFileBytes,
-        brainFolderBytes: brain?.totalBytes ?? 0,
-        messageCount,
-        resolvedVersionCount: brain?.resolvedVersionCount ?? 0,
-        bytesPerToken: config.bytesPerToken,
-      }),
-      annotation_timestamp: conv.annotationTimestamp,
-      created_at: conv.createdAt.toISOString(),
-      last_modified: conv.lastModified.toISOString(),
+      message_count_source: messageCountSource,
+      estimated_prompt_tokens: metrics.estimatedPromptTokens,
+      estimated_artifact_tokens: metrics.estimatedArtifactTokens,
+      estimated_tokens: metrics.estimatedTotalTokens,
+      annotation_timestamp: conversationEntry.annotationTimestamp,
+      created_at: conversationEntry.createdAt.toISOString(),
+      last_modified: conversationEntry.lastModified.toISOString(),
+      last_active_at: activity.lastActiveAt,
+      activity_source: activity.activitySource,
+      mapping_source: mapping.mappingSource,
+      mapping_confidence: mapping.mappingConfidence,
+      is_active: activeConversationId === conversationEntry.id ? 1 : 0,
     };
 
-    db.upsertConversation(conversation);
-    stats.totalPbBytes += conv.pbFileBytes;
-    stats.totalBrainBytes += brain?.totalBytes ?? 0;
+    db.upsertConversation(canonicalConversation);
+    takeSnapshotIfChanged(db, canonicalConversation);
 
-    // Take snapshot
-    const lastSnap = db.getLatestSnapshot(conv.id);
-    const deltaBytes = lastSnap ? conv.pbFileBytes - (lastSnap.pb_file_bytes || 0) : 0;
-
-    db.insertSnapshot({
-      conversation_id: conv.id,
-      timestamp: now,
-      pb_file_bytes: conv.pbFileBytes,
-      estimated_tokens: conversation.estimated_tokens,
-      message_count: messageCount,
-      delta_bytes: deltaBytes,
-    });
+    stats.totalPbBytes += canonicalConversation.pb_file_bytes;
+    stats.totalBrainBytes += canonicalConversation.brain_folder_bytes;
   }
 
-  // ── 8. Detect orphan brain folders ──
+  db.deleteConversationsNotIn(scannedConversationIds);
 
-  for (const be of brainEntries) {
-    if (!conversationIds.has(be.conversationId)) {
+  for (const workspace of workspaceRegistry.values()) {
+    db.updateWorkspaceAggregates(workspace.id);
+  }
+
+  const scannedConversationIdSet = new Set(scannedConversationIds);
+  for (const brainEntry of brainEntries) {
+    if (!scannedConversationIdSet.has(brainEntry.conversationId)) {
       stats.orphanBrainFolders++;
     }
   }
 
-  // ── 9. Update workspace aggregates ──
-
-  for (const [, ws] of workspaceMap) {
-    db.updateWorkspaceAggregates(ws.id);
-  }
-
+  stats.conversationsTotal = conversations.length;
+  stats.brainFoldersFound = brainEntries.length;
   return stats;
 }

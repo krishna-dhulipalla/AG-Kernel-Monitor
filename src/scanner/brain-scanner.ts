@@ -9,8 +9,9 @@
  */
 
 import { readdirSync, statSync, readFileSync, existsSync } from "fs";
-import { join, basename } from "path";
+import { join } from "path";
 import { getBrainDir } from "../paths";
+import { findFileUrisInText } from "../uri-utils";
 
 export interface BrainScanEntry {
   conversationId: string;
@@ -19,6 +20,7 @@ export interface BrainScanEntry {
   artifactCount: number;
   resolvedVersionCount: number;
   workspaceUris: string[];
+  title?: string;
   brainPath: string;
 }
 
@@ -119,15 +121,8 @@ function extractWorkspaceUris(dirPath: string): string[] {
       } else if (entry.isFile() && (entry.name.endsWith(".md") || entry.name.endsWith(".txt"))) {
         try {
           const content = readFileSync(fullPath, "utf-8");
-          // Match file:// URIs pointing to project directories
-          const matches = content.matchAll(/file:\/\/\/[^\s)"\]]+/g);
-          for (const match of matches) {
-            // Extract the workspace root (first 3-4 path segments)
-            const uri = match[0];
-            const pathMatch = uri.match(/^(file:\/\/\/(?:[^/]+\/){3,4}[^/]+)/);
-            if (pathMatch) {
-              uris.add(pathMatch[1]);
-            }
+          for (const uri of findFileUrisInText(content)) {
+            uris.add(uri);
           }
         } catch {
           // Skip unreadable files
@@ -139,6 +134,40 @@ function extractWorkspaceUris(dirPath: string): string[] {
   }
 
   return Array.from(uris);
+}
+
+function extractBrainTitle(dirPath: string): string | undefined {
+  const preferredFiles = [
+    "task.md",
+    "walkthrough.md",
+    "overview.txt",
+    "task.md.metadata.json",
+    "walkthrough.md.metadata.json",
+  ];
+
+  for (const fileName of preferredFiles) {
+    const filePath = join(dirPath, fileName);
+    if (!existsSync(filePath)) continue;
+
+    try {
+      const content = readFileSync(filePath, "utf-8");
+      const headingMatch = content.match(/^#\s+(.+)$/m);
+      if (headingMatch?.[1]) {
+        return headingMatch[1].trim();
+      }
+
+      if (fileName.endsWith(".json")) {
+        const parsed = JSON.parse(content) as { summary?: unknown };
+        if (typeof parsed.summary === "string" && parsed.summary.trim().length >= 6) {
+          return parsed.summary.trim();
+        }
+      }
+    } catch {
+      continue;
+    }
+  }
+
+  return undefined;
 }
 
 /**
@@ -177,6 +206,7 @@ export function scanBrainFolders(customPath?: string): BrainScanEntry[] {
         artifactCount,
         resolvedVersionCount: resolvedCount,
         workspaceUris,
+        title: extractBrainTitle(brainPath),
         brainPath,
       });
     }
@@ -204,6 +234,7 @@ export function getBrainEntry(conversationId: string, customPath?: string): Brai
     artifactCount: countArtifacts(brainPath),
     resolvedVersionCount: countResolvedVersions(brainPath),
     workspaceUris: extractWorkspaceUris(brainPath),
+    title: extractBrainTitle(brainPath),
     brainPath,
   };
 }

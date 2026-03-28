@@ -1,10 +1,5 @@
 /**
- * `agk scan` — One-shot scan and display.
- *
- * Displays:
- *   - Workspace summary table (all workspaces)
- *   - Drill-down into a specific workspace with --workspace flag
- *   - Live watch mode with --watch flag
+ * `agk scan` — one-shot scan and display.
  */
 
 import { Command } from "commander";
@@ -13,20 +8,33 @@ import Table from "cli-table3";
 import type { MonitorDB } from "../../db/schema";
 import type { AgKernelConfig } from "../../config";
 import { reconcile } from "../../ingest/reconciler";
-import { assessHealth, assessWorkspaceHealth } from "../../metrics/health";
-import { formatBytes, formatTokens } from "../../metrics/estimator";
+import {
+  type ConversationViewModel,
+  buildWorkspaceViewModel,
+  getCurrentConversationView,
+  listConversationViewModels,
+  listWorkspaceViewModels,
+} from "../../view-models";
 
 export function registerScanCommand(program: Command, db: MonitorDB, config: AgKernelConfig): void {
   program
     .command("scan")
     .description("Scan Antigravity data and display workspace/conversation metrics")
     .option("-w, --workspace <name>", "Drill into a specific workspace")
+    .option("-c, --conversation <uuid>", "Show a single conversation by id")
+    .option("--current", "Show only the current or most recent conversation")
     .option("--watch", "Enter live monitoring mode (file watcher + log tailer)")
     .option("--json", "Output raw JSON")
     .action(async (options) => {
       const useJson = options.json || program.opts().json;
+      const watchMode = Boolean(options.watch);
 
-      // Run full ingestion
+      if (useJson && watchMode) {
+        console.error("watch mode does not support --json");
+        process.exitCode = 1;
+        return;
+      }
+
       if (!useJson) {
         console.error(chalk.dim("🔍 Scanning Antigravity data..."));
       }
@@ -35,9 +43,7 @@ export function registerScanCommand(program: Command, db: MonitorDB, config: AgK
       const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
 
       if (!useJson) {
-        console.error(
-          chalk.dim(`   Scanned ${stats.conversationsTotal} conversations in ${elapsed}s`)
-        );
+        console.error(chalk.dim(`   Scanned ${stats.conversationsTotal} conversations in ${elapsed}s`));
         console.error(
           chalk.dim(
             `   Mapped: ${stats.conversationsMapped} | Unmapped: ${stats.conversationsUnmapped} | Brain orphans: ${stats.orphanBrainFolders}`
@@ -46,227 +52,235 @@ export function registerScanCommand(program: Command, db: MonitorDB, config: AgK
         console.error();
       }
 
-      if (options.workspace) {
-        // ── Drill-down mode ──
-        await displayWorkspaceDetail(db, config, options.workspace, useJson);
-      } else if (options.watch) {
-        // ── Live watch mode ──
-        console.log(chalk.yellow("🔄 Watch mode — press Ctrl+C to exit"));
-        console.log(chalk.dim("   Monitoring conversations/ directory for changes..."));
-        console.log();
+      if (options.conversation) {
+        displayConversationDetail(db, config, options.conversation, useJson);
+        return;
+      }
 
-        // Display initial state
+      if (options.current) {
+        displayCurrentConversation(db, config, useJson);
+        return;
+      }
+
+      if (options.workspace) {
+        displayWorkspaceDetail(db, config, options.workspace, useJson);
+        return;
+      }
+
+      if (watchMode) {
+        if (!useJson) {
+          console.log(chalk.yellow("🔄 Watch mode — press Ctrl+C to exit"));
+          console.log();
+        }
+
+        displayCurrentConversation(db, config, useJson);
+        if (!useJson) {
+          console.log();
+        }
         displayWorkspaceSummary(db, config, useJson);
 
-        // Start file watcher (Sprint 5 will enhance this)
+        if (!useJson) {
+          console.log();
+          console.log(chalk.dim("   Monitoring live session growth..."));
+        }
+
         const { startFileWatcher } = await import("../../watcher/file-watcher");
         const { startLogTailer } = await import("../../watcher/log-tailer");
-
         startFileWatcher(db, config);
-        startLogTailer(db);
-
-      } else {
-        // ── Summary mode ──
-        displayWorkspaceSummary(db, config, useJson);
+        startLogTailer(db, config);
+        return;
       }
+
+      if (useJson) {
+        console.log(JSON.stringify(buildScanSummaryJson(db, config), null, 2));
+        return;
+      }
+
+      displayCurrentConversation(db, config, useJson);
+      console.log();
+      displayWorkspaceSummary(db, config, useJson);
     });
 }
 
-/**
- * Display workspace summary table.
- */
-function displayWorkspaceSummary(db: MonitorDB, config: AgKernelConfig, useJson: boolean): void {
-  const workspaces = db.getAllWorkspaces();
+function buildScanSummaryJson(db: MonitorDB, config: AgKernelConfig) {
+  return {
+    currentConversation: getCurrentConversationView(db, config),
+    workspaces: listWorkspaceViewModels(db, config)
+      .filter((workspace) => workspace.conversationCount > 0 || workspace.uri === "__unmapped__"),
+  };
+}
+
+function displayCurrentConversation(db: MonitorDB, config: AgKernelConfig, useJson: boolean): void {
+  const current = getCurrentConversationView(db, config);
 
   if (useJson) {
-    const data = workspaces.map((ws) => {
-      const conversations = db.getConversationsByWorkspace(ws.id);
-      const totalTokens = conversations.reduce((sum, c) => sum + c.estimated_tokens, 0);
-      const totalMessages = conversations.reduce(
-        (sum, c) => sum + (c.message_count || 0),
-        0
-      );
-      const health = assessWorkspaceHealth(
-        conversations.map((c) => c.estimated_tokens),
-        config.bloatLimit
-      );
-      return {
-        name: ws.name,
-        uri: ws.uri,
-        estimatedTokens: totalTokens,
-        conversations: ws.conversation_count,
-        messages: totalMessages,
-        brainSize: ws.total_brain_bytes,
-        health: health.status,
-      };
-    });
-    console.log(JSON.stringify(data, null, 2));
+    console.log(JSON.stringify(current, null, 2));
     return;
   }
 
-  // Build the formatted table
+  if (!current.conversation) {
+    console.log(chalk.bold("Current Conversation"));
+    console.log(chalk.dim("  No conversations found."));
+    return;
+  }
+
+  const label = current.mode === "active" ? "Current Conversation" : "Most Recent Conversation";
+  displayConversationCard(current.conversation, label, current.mode === "active");
+}
+
+function displayWorkspaceSummary(db: MonitorDB, config: AgKernelConfig, useJson: boolean): void {
+  const workspaces = listWorkspaceViewModels(db, config)
+    .filter((workspace) => workspace.conversationCount > 0 || workspace.uri === "__unmapped__");
+
+  if (useJson) {
+    console.log(JSON.stringify({ workspaces }, null, 2));
+    return;
+  }
+
   const table = new Table({
     head: [
       chalk.bold("Workspace"),
-      chalk.bold("Est.Tokens"),
+      chalk.bold("Est.Total"),
       chalk.bold("Chats"),
-      chalk.bold("Messages"),
-      chalk.bold("Brain Size"),
+      chalk.bold("Active"),
+      chalk.bold("Largest"),
       chalk.bold("Health"),
     ],
-    style: {
-      head: [],
-      border: [],
-    },
-    colWidths: [28, 12, 8, 11, 12, 10],
+    style: { head: [], border: [] },
+    colWidths: [28, 12, 8, 8, 12, 10],
   });
 
-  let grandTotalTokens = 0;
-  let grandTotalChats = 0;
-  let grandTotalMessages = 0;
-  let grandTotalBrain = 0;
-
-  for (const ws of workspaces) {
-    if (ws.conversation_count === 0 && ws.uri !== "__unmapped__") continue;
-
-    const conversations = db.getConversationsByWorkspace(ws.id);
-    const totalTokens = conversations.reduce((sum, c) => sum + c.estimated_tokens, 0);
-    const totalMessages = conversations.reduce(
-      (sum, c) => sum + (c.message_count || 0),
-      0
-    );
-    const hasUnknownMessages = conversations.some((c) => c.message_count === null);
-
-    const health = assessWorkspaceHealth(
-      conversations.map((c) => c.estimated_tokens),
-      config.bloatLimit
-    );
-
+  for (const workspace of workspaces) {
     table.push([
-      ws.name.length > 26 ? ws.name.slice(0, 23) + "..." : ws.name,
-      formatTokens(totalTokens),
-      String(ws.conversation_count),
-      hasUnknownMessages ? `~${totalMessages}` : String(totalMessages),
-      formatBytes(ws.total_brain_bytes),
-      `${health.emoji}`,
+      workspace.name.length > 26 ? `${workspace.name.slice(0, 23)}...` : workspace.name,
+      workspace.estimatedTokensFormatted,
+      String(workspace.conversationCount),
+      String(workspace.activeConversationCount),
+      workspace.largestConversationTokensFormatted,
+      workspace.healthEmoji,
     ]);
-
-    grandTotalTokens += totalTokens;
-    grandTotalChats += ws.conversation_count;
-    grandTotalMessages += totalMessages;
-    grandTotalBrain += ws.total_brain_bytes;
   }
 
-  // Totals row
-  table.push([
-    chalk.bold("TOTAL"),
-    chalk.bold(formatTokens(grandTotalTokens)),
-    chalk.bold(String(grandTotalChats)),
-    chalk.bold(`~${grandTotalMessages}`),
-    chalk.bold(formatBytes(grandTotalBrain)),
-    "",
-  ]);
-
   console.log(table.toString());
-
-  // Overall stats
-  const totalStats = db.getTotalStats();
-  console.log();
-  console.log(chalk.dim(`Total .pb disk usage: ${formatBytes(totalStats.total_pb_bytes)}`));
-  console.log(chalk.dim(`Bloat limit: ${formatTokens(config.bloatLimit)} tokens`));
 }
 
-/**
- * Display drill-down table for a specific workspace.
- */
-async function displayWorkspaceDetail(
-  db: MonitorDB,
-  config: AgKernelConfig,
-  workspaceName: string,
-  useJson: boolean,
-): Promise<void> {
-  // Find workspace by name (partial match)
-  const allWorkspaces = db.getAllWorkspaces();
-  const workspace = allWorkspaces.find(
-    (w) => w.name.toLowerCase() === workspaceName.toLowerCase() ||
-           w.name.toLowerCase().includes(workspaceName.toLowerCase())
+function displayWorkspaceDetail(db: MonitorDB, config: AgKernelConfig, workspaceName: string, useJson: boolean): void {
+  const workspace = db.getAllWorkspaces().find(
+    (entry) =>
+      entry.name.toLowerCase() === workspaceName.toLowerCase()
+      || entry.name.toLowerCase().includes(workspaceName.toLowerCase())
   );
 
   if (!workspace) {
     console.error(chalk.red(`❌ Workspace "${workspaceName}" not found`));
-    console.log(chalk.dim("Available workspaces:"));
-    for (const ws of allWorkspaces) {
-      if (ws.conversation_count > 0) {
-        console.log(chalk.dim(`  - ${ws.name}`));
-      }
-    }
     return;
   }
 
-  const conversations = db.getConversationsByWorkspace(workspace.id);
+  const conversations = listConversationViewModels(
+    db,
+    config,
+    db.getConversationsByWorkspace(workspace.id),
+  );
+  const workspaceView = buildWorkspaceViewModel(db, config, workspace);
 
   if (useJson) {
-    console.log(JSON.stringify(conversations, null, 2));
+    console.log(JSON.stringify({
+      workspace: workspaceView,
+      conversations,
+    }, null, 2));
     return;
   }
 
-  console.log(chalk.bold(`📂 ${workspace.name}`));
-  console.log(chalk.dim(`   URI: ${workspace.uri}`));
+  console.log(chalk.bold(`Workspace: ${workspaceView.name}`));
+  console.log(chalk.dim(`  Estimated total: ${workspaceView.estimatedTokensFormatted} tokens`));
+  console.log(chalk.dim(`  Conversations: ${workspaceView.conversationCount}`));
+  console.log(chalk.dim(`  Largest session: ${workspaceView.largestConversationTokensFormatted}`));
   console.log();
 
   const table = new Table({
     head: [
-      chalk.bold("Session ID"),
-      chalk.bold(".pb Size"),
-      chalk.bold("Est.Tokens"),
-      chalk.bold("Messages"),
-      chalk.bold("Brain Size"),
+      chalk.bold("Session"),
+      chalk.bold("Title"),
+      chalk.bold("Est.Total"),
+      chalk.bold("Msgs"),
       chalk.bold("Last Active"),
+      chalk.bold("Map"),
       chalk.bold("Health"),
     ],
-    style: {
-      head: [],
-      border: [],
-    },
-    colWidths: [16, 10, 12, 10, 12, 14, 10],
+    style: { head: [], border: [] },
+    colWidths: [16, 28, 12, 10, 14, 16, 10],
   });
 
-  for (const conv of conversations) {
-    const health = assessHealth(conv.estimated_tokens, config.bloatLimit);
-
-    // Format last modified as relative time
-    const lastMod = conv.last_modified ? relativeTime(new Date(conv.last_modified)) : "—";
-
+  for (const conversation of conversations) {
     table.push([
-      conv.id.slice(0, 12) + "...",
-      formatBytes(conv.pb_file_bytes),
-      formatTokens(conv.estimated_tokens),
-      conv.message_count !== null ? String(conv.message_count) : "—",
-      formatBytes(conv.brain_folder_bytes),
-      lastMod,
-      `${health.emoji}`,
+      `${conversation.id.slice(0, 12)}...`,
+      truncate(conversation.title ?? "Untitled", 26),
+      conversation.estimatedTotalTokensFormatted,
+      formatMessageCount(conversation),
+      conversation.lastActiveRelative,
+      truncate(conversation.mappingSource ?? "unknown", 14),
+      conversation.healthEmoji,
     ]);
   }
 
   console.log(table.toString());
 }
 
-/**
- * Format a date as relative time (e.g., "2 hrs ago", "3 days ago").
- */
-function relativeTime(date: Date): string {
-  const now = Date.now();
-  const diff = now - date.getTime();
+function displayConversationDetail(db: MonitorDB, config: AgKernelConfig, conversationId: string, useJson: boolean): void {
+  const conversation = db.getConversation(conversationId);
+  if (!conversation) {
+    console.error(chalk.red(`❌ Conversation "${conversationId}" not found`));
+    return;
+  }
 
-  const seconds = Math.floor(diff / 1000);
-  const minutes = Math.floor(seconds / 60);
-  const hours = Math.floor(minutes / 60);
-  const days = Math.floor(hours / 24);
-  const weeks = Math.floor(days / 7);
+  const view = listConversationViewModels(db, config, [conversation])[0];
 
-  if (weeks > 0) return `${weeks} week${weeks > 1 ? "s" : ""} ago`;
-  if (days > 0) return `${days} day${days > 1 ? "s" : ""} ago`;
-  if (hours > 0) return `${hours} hr${hours > 1 ? "s" : ""} ago`;
-  if (minutes > 0) return `${minutes} min ago`;
-  return "just now";
+  if (useJson) {
+    console.log(JSON.stringify(view, null, 2));
+    return;
+  }
+
+  displayConversationCard(view, "Conversation Detail", view.isActive);
+}
+
+function displayConversationCard(view: ConversationViewModel, label: string, emphasizeActive: boolean): void {
+  console.log(chalk.bold(label));
+  console.log(chalk.dim(`  Session: ${view.id}`));
+  console.log(chalk.dim(`  Title: ${view.title ?? "Untitled"}`));
+  console.log(chalk.dim(`  Workspace: ${view.workspaceName}`));
+  console.log(
+    chalk.dim(
+      `  Last Active: ${view.lastActiveRelative}${view.lastActiveAt ? ` (${view.lastActiveAt})` : ""}${emphasizeActive ? " [ACTIVE]" : ""}`
+    )
+  );
+  console.log(
+    chalk.dim(
+      `  Messages: ${view.messageCount !== null ? view.messageCount : "unknown"}${view.messageCountSource ? ` (${view.messageCountSource})` : ""}`
+    )
+  );
+  console.log(
+    chalk.dim(
+      `  Estimated Context: ${view.estimatedTotalTokensFormatted} tokens (${view.contextRatioFormatted} of limit)`
+    )
+  );
+  console.log(
+    chalk.dim(
+      `  Breakdown: prompt/history ${view.estimatedPromptTokens.toLocaleString()} • artifacts ${view.estimatedArtifactTokens.toLocaleString()}`
+    )
+  );
+  console.log(chalk.dim(`  Delta: ${view.deltaEstimatedTokensFormatted} estimated tokens`));
+  console.log(chalk.dim(`  Mapping: ${view.mappingSource ?? "unknown"} (${view.mappingConfidence ?? 0})`));
+  console.log(chalk.dim(`  Why Heavy: ${view.whyHeavy}`));
+}
+
+function formatMessageCount(view: ConversationViewModel): string {
+  if (view.messageCount === null) {
+    return "unknown";
+  }
+
+  return view.messageCountSource ? `${view.messageCount} (${view.messageCountSource})` : String(view.messageCount);
+}
+
+function truncate(value: string, maxLength: number): string {
+  return value.length > maxLength ? `${value.slice(0, maxLength - 3)}...` : value;
 }

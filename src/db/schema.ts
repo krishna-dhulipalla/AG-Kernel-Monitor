@@ -2,16 +2,14 @@
  * SQLite database schema and access layer using bun:sqlite.
  *
  * Tables:
- *   - workspaces:     workspace registry from storage.json
- *   - conversations:  per-conversation metrics (1:1 with .pb files)
+ *   - workspaces:     workspace registry from Antigravity metadata
+ *   - conversations:  canonical conversation telemetry records
  *   - snapshots:      historical trend tracking per conversation
  */
 
 import { Database } from "bun:sqlite";
-import { mkdirSync, existsSync } from "fs";
+import { existsSync, mkdirSync } from "fs";
 import { dirname } from "path";
-
-// ─── Types ──────────────────────────────────────────────────────────────────
 
 export interface Workspace {
   id: string;
@@ -26,15 +24,24 @@ export interface Workspace {
 export interface Conversation {
   id: string;
   workspace_id: string | null;
+  title: string | null;
   pb_file_bytes: number;
   brain_folder_bytes: number;
   brain_artifact_count: number;
   resolved_version_count: number;
   message_count: number | null;
+  message_count_source: string | null;
+  estimated_prompt_tokens: number;
+  estimated_artifact_tokens: number;
   estimated_tokens: number;
   annotation_timestamp: number | null;
   created_at: string | null;
   last_modified: string | null;
+  last_active_at: string | null;
+  activity_source: string | null;
+  mapping_source: string | null;
+  mapping_confidence: number | null;
+  is_active: number;
 }
 
 export interface Snapshot {
@@ -46,8 +53,6 @@ export interface Snapshot {
   message_count: number | null;
   delta_bytes: number | null;
 }
-
-// ─── Schema DDL ─────────────────────────────────────────────────────────────
 
 const SCHEMA_SQL = `
   CREATE TABLE IF NOT EXISTS workspaces (
@@ -63,15 +68,24 @@ const SCHEMA_SQL = `
   CREATE TABLE IF NOT EXISTS conversations (
     id TEXT PRIMARY KEY,
     workspace_id TEXT,
+    title TEXT,
     pb_file_bytes INTEGER DEFAULT 0,
     brain_folder_bytes INTEGER DEFAULT 0,
     brain_artifact_count INTEGER DEFAULT 0,
     resolved_version_count INTEGER DEFAULT 0,
     message_count INTEGER,
+    message_count_source TEXT,
+    estimated_prompt_tokens INTEGER DEFAULT 0,
+    estimated_artifact_tokens INTEGER DEFAULT 0,
     estimated_tokens INTEGER DEFAULT 0,
     annotation_timestamp INTEGER,
     created_at TEXT,
     last_modified TEXT,
+    last_active_at TEXT,
+    activity_source TEXT,
+    mapping_source TEXT,
+    mapping_confidence REAL,
+    is_active INTEGER DEFAULT 0,
     FOREIGN KEY (workspace_id) REFERENCES workspaces(id)
   );
 
@@ -96,13 +110,10 @@ const SCHEMA_SQL = `
     ON snapshots(timestamp);
 `;
 
-// ─── Database Manager ───────────────────────────────────────────────────────
-
 export class MonitorDB {
   private db: Database;
 
   constructor(dbPath: string) {
-    // Ensure parent directory exists
     const dir = dirname(dbPath);
     if (!existsSync(dir)) {
       mkdirSync(dir, { recursive: true });
@@ -114,12 +125,28 @@ export class MonitorDB {
     this.init();
   }
 
-  /** Create tables if they don't exist */
   private init(): void {
     this.db.exec(SCHEMA_SQL);
+    this.ensureColumn("conversations", "title", "TEXT");
+    this.ensureColumn("conversations", "message_count_source", "TEXT");
+    this.ensureColumn("conversations", "estimated_prompt_tokens", "INTEGER DEFAULT 0");
+    this.ensureColumn("conversations", "estimated_artifact_tokens", "INTEGER DEFAULT 0");
+    this.ensureColumn("conversations", "last_active_at", "TEXT");
+    this.ensureColumn("conversations", "activity_source", "TEXT");
+    this.ensureColumn("conversations", "mapping_source", "TEXT");
+    this.ensureColumn("conversations", "mapping_confidence", "REAL");
+    this.ensureColumn("conversations", "is_active", "INTEGER DEFAULT 0");
+    this.db.exec("CREATE INDEX IF NOT EXISTS idx_conversations_active ON conversations(is_active, last_active_at)");
   }
 
-  // ─── Workspace CRUD ───────────────────────────────────────────────────
+  private ensureColumn(table: string, column: string, definition: string): void {
+    const columns = this.db.query(`PRAGMA table_info(${table})`).all() as { name: string }[];
+    if (columns.some((entry) => entry.name === column)) {
+      return;
+    }
+
+    this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+  }
 
   upsertWorkspace(ws: Omit<Workspace, "total_pb_bytes" | "total_brain_bytes" | "conversation_count">): void {
     this.db.run(
@@ -156,28 +183,56 @@ export class MonitorDB {
     return this.db.query("SELECT * FROM workspaces WHERE id = ?1").get(id) as Workspace | null;
   }
 
-  // ─── Conversation CRUD ────────────────────────────────────────────────
-
   upsertConversation(conv: Conversation): void {
     this.db.run(
-      `INSERT INTO conversations (id, workspace_id, pb_file_bytes, brain_folder_bytes,
+      `INSERT INTO conversations (
+         id, workspace_id, title, pb_file_bytes, brain_folder_bytes,
          brain_artifact_count, resolved_version_count, message_count,
-         estimated_tokens, annotation_timestamp, created_at, last_modified)
-       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+         message_count_source, estimated_prompt_tokens, estimated_artifact_tokens,
+         estimated_tokens, annotation_timestamp, created_at, last_modified,
+         last_active_at, activity_source, mapping_source, mapping_confidence, is_active
+       )
+       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)
        ON CONFLICT(id) DO UPDATE SET
          workspace_id = excluded.workspace_id,
+         title = excluded.title,
          pb_file_bytes = excluded.pb_file_bytes,
          brain_folder_bytes = excluded.brain_folder_bytes,
          brain_artifact_count = excluded.brain_artifact_count,
          resolved_version_count = excluded.resolved_version_count,
          message_count = excluded.message_count,
+         message_count_source = excluded.message_count_source,
+         estimated_prompt_tokens = excluded.estimated_prompt_tokens,
+         estimated_artifact_tokens = excluded.estimated_artifact_tokens,
          estimated_tokens = excluded.estimated_tokens,
          annotation_timestamp = excluded.annotation_timestamp,
-         last_modified = excluded.last_modified`,
+         last_modified = excluded.last_modified,
+         last_active_at = excluded.last_active_at,
+         activity_source = excluded.activity_source,
+         mapping_source = excluded.mapping_source,
+         mapping_confidence = excluded.mapping_confidence,
+         is_active = excluded.is_active`,
       [
-        conv.id, conv.workspace_id, conv.pb_file_bytes, conv.brain_folder_bytes,
-        conv.brain_artifact_count, conv.resolved_version_count, conv.message_count,
-        conv.estimated_tokens, conv.annotation_timestamp, conv.created_at, conv.last_modified,
+        conv.id,
+        conv.workspace_id,
+        conv.title,
+        conv.pb_file_bytes,
+        conv.brain_folder_bytes,
+        conv.brain_artifact_count,
+        conv.resolved_version_count,
+        conv.message_count,
+        conv.message_count_source,
+        conv.estimated_prompt_tokens,
+        conv.estimated_artifact_tokens,
+        conv.estimated_tokens,
+        conv.annotation_timestamp,
+        conv.created_at,
+        conv.last_modified,
+        conv.last_active_at,
+        conv.activity_source,
+        conv.mapping_source,
+        conv.mapping_confidence,
+        conv.is_active,
       ]
     );
   }
@@ -185,11 +240,12 @@ export class MonitorDB {
   getConversationsByWorkspace(workspaceId: string | null): Conversation[] {
     if (workspaceId === null) {
       return this.db.query(
-        "SELECT * FROM conversations WHERE workspace_id IS NULL ORDER BY pb_file_bytes DESC"
+        "SELECT * FROM conversations WHERE workspace_id IS NULL ORDER BY estimated_tokens DESC, pb_file_bytes DESC"
       ).all() as Conversation[];
     }
+
     return this.db.query(
-      "SELECT * FROM conversations WHERE workspace_id = ?1 ORDER BY pb_file_bytes DESC"
+      "SELECT * FROM conversations WHERE workspace_id = ?1 ORDER BY estimated_tokens DESC, pb_file_bytes DESC"
     ).all(workspaceId) as Conversation[];
   }
 
@@ -198,7 +254,17 @@ export class MonitorDB {
   }
 
   getAllConversations(): Conversation[] {
-    return this.db.query("SELECT * FROM conversations ORDER BY pb_file_bytes DESC").all() as Conversation[];
+    return this.db.query(
+      "SELECT * FROM conversations ORDER BY estimated_tokens DESC, pb_file_bytes DESC"
+    ).all() as Conversation[];
+  }
+
+  getCurrentConversation(): Conversation | null {
+    return this.db.query(
+      `SELECT * FROM conversations
+       ORDER BY is_active DESC, COALESCE(last_active_at, last_modified) DESC, estimated_tokens DESC
+       LIMIT 1`
+    ).get() as Conversation | null;
   }
 
   deleteConversation(id: string): void {
@@ -207,21 +273,45 @@ export class MonitorDB {
   }
 
   deleteConversationsByWorkspace(workspaceId: string): string[] {
-    const convos = this.getConversationsByWorkspace(workspaceId);
-    const ids = convos.map((c) => c.id);
+    const conversations = this.getConversationsByWorkspace(workspaceId);
+    const ids = conversations.map((conversation) => conversation.id);
     for (const id of ids) {
       this.deleteConversation(id);
     }
     return ids;
   }
 
-  // ─── Snapshot CRUD ────────────────────────────────────────────────────
+  deleteConversationsNotIn(ids: string[]): string[] {
+    const current = this.db.query("SELECT id FROM conversations").all() as { id: string }[];
+    const allowed = new Set(ids);
+    const removed: string[] = [];
+
+    for (const row of current) {
+      if (!allowed.has(row.id)) {
+        this.deleteConversation(row.id);
+        removed.push(row.id);
+      }
+    }
+
+    return removed;
+  }
+
+  clearActiveConversation(): void {
+    this.db.run("UPDATE conversations SET is_active = 0");
+  }
 
   insertSnapshot(snap: Omit<Snapshot, "id">): void {
     this.db.run(
       `INSERT INTO snapshots (conversation_id, timestamp, pb_file_bytes, estimated_tokens, message_count, delta_bytes)
        VALUES (?1, ?2, ?3, ?4, ?5, ?6)`,
-      [snap.conversation_id, snap.timestamp, snap.pb_file_bytes, snap.estimated_tokens, snap.message_count, snap.delta_bytes]
+      [
+        snap.conversation_id,
+        snap.timestamp,
+        snap.pb_file_bytes,
+        snap.estimated_tokens,
+        snap.message_count,
+        snap.delta_bytes,
+      ]
     );
   }
 
@@ -237,9 +327,12 @@ export class MonitorDB {
     ).all(conversationId, limit) as Snapshot[];
   }
 
-  // ─── Aggregate Queries ────────────────────────────────────────────────
-
-  getTotalStats(): { total_pb_bytes: number; total_brain_bytes: number; total_conversations: number; total_estimated_tokens: number } {
+  getTotalStats(): {
+    total_pb_bytes: number;
+    total_brain_bytes: number;
+    total_conversations: number;
+    total_estimated_tokens: number;
+  } {
     return this.db.query(`
       SELECT
         COALESCE(SUM(pb_file_bytes), 0) as total_pb_bytes,
@@ -247,16 +340,18 @@ export class MonitorDB {
         COUNT(*) as total_conversations,
         COALESCE(SUM(estimated_tokens), 0) as total_estimated_tokens
       FROM conversations
-    `).get() as any;
+    `).get() as {
+      total_pb_bytes: number;
+      total_brain_bytes: number;
+      total_conversations: number;
+      total_estimated_tokens: number;
+    };
   }
-
-  // ─── Lifecycle ────────────────────────────────────────────────────────
 
   close(): void {
     this.db.close();
   }
 
-  /** Expose raw db for advanced queries */
   raw(): Database {
     return this.db;
   }
