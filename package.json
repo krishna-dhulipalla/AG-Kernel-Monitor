@@ -1,7 +1,7 @@
 {
   "name": "ag-kernel-monitor",
   "displayName": "AG Kernel Monitor",
-  "publisher": "vamsi",
+  "publisher": "Krishnadhulipalla",
   "version": "0.1.0",
   "description": "Deep token consumption and cache bloat monitoring for Google Antigravity sessions",
   "type": "module",
