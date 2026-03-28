@@ -6,6 +6,8 @@ dist/
 
 # Runtime data
 *.db
+.tmp*
+docs/
 
 # Bun
 bun.lock

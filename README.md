@@ -1,63 +1,56 @@
 # AG-Kernel-Monitor
 
-CLI monitoring for Google Antigravity session growth, estimated context bloat, and cleanup decisions.
+AG Kernel Monitor helps you see what Antigravity is doing to your conversations: current session growth, estimated context size, workspace mapping, unmapped sessions, brain/cache bloat, and cleanup targets.
 
-AG Kernel Monitor is a Bun-based local utility that scans Antigravity data, maps conversations back to workspaces, tracks estimated context growth, and highlights sessions that are becoming expensive to keep alive.
+The primary product direction is the VS Code sidebar extension. The CLI remains available for direct inspection and automation.
 
-This project is `CLI First`. Token and context numbers are labeled as `estimated` unless they come directly from runtime signals such as live logs.
+## Install
 
-## Why
+### 1. Preferred: VS Code / Open VSX extension
 
-Antigravity sessions can silently accumulate large amounts of context across:
+Use the Open VSX extension once it is published.
 
-- conversation history
-- planning and brain artifacts
-- cached workspace state
+The sidebar is designed to show:
 
-The main problem is not just "a session is large". The useful questions are:
+- current conversation
+- current editor workspace details
+- global brain/cache and cleanup view
+- settings and runtime status
 
-- Which conversation is active right now?
-- How large is its current estimated context?
-- How much did the last turn add?
-- Which workspace does it belong to?
-- Which sessions are safe cleanup targets?
-- Which artifacts are orphaned or unmapped?
+### 2. If Open VSX is not available: manual extension install
 
-AG Kernel Monitor is built to answer those questions in a way the Antigravity UI currently does not.
+Install the extension from a `.vsix` package through VS Code:
 
-## Current Scope
+1. Open Extensions in VS Code.
+2. Open the `...` menu.
+3. Choose `Install from VSIX...`.
+4. Select the downloaded AG Kernel Monitor `.vsix`.
 
-The monitor currently provides:
-
-- workspace and conversation scans
-- current or most recent conversation visibility
-- estimated prompt/history and artifact token breakdowns
-- mapping provenance and confidence
-- live watch mode for file and log growth
-- cleanup-oriented reporting for large and unmapped sessions
-- a local JSON API for downstream UI work
-
-It does not claim exact model billing, exact reasoning-token accounting, or exact dollar-cost reporting.
-
-## Installation
+For local development from this repo:
 
 ```bash
-git clone https://github.com/your-username/AG-Kernel-Monitor.git
-cd AG-Kernel-Monitor
 bun install
+bun run build:vsx-cli
 ```
 
-Requires [Bun.js](https://bun.sh/).
+Then run the extension host from the repo with the launch config in `.vscode/launch.json`.
 
-## Usage
+### 3. CLI fallback
 
-### Scan
+If you do not want the extension yet, use the CLI directly:
 
 ```bash
-# Workspace summary plus current conversation
+bun install
+bun run dev scan
+```
+
+Useful commands:
+
+```bash
+# Summary plus current or most recent conversation
 bun run dev scan
 
-# Show only the current or most recent conversation
+# Current or most recent conversation only
 bun run dev scan --current
 
 # Drill into a workspace
@@ -66,104 +59,51 @@ bun run dev scan --workspace "My-Project"
 # Drill into a single conversation
 bun run dev scan --conversation <uuid>
 
-# Live monitoring mode
-bun run dev scan --watch
-
-# JSON output
-bun run dev scan --json
-```
-
-### Report
-
-```bash
-# Action-oriented health report
+# Health / cleanup report
 bun run dev report
-
-# JSON report
-bun run dev report --json
 ```
 
-### Cleanup
+## Setup Effort
 
-```bash
-# Preview what would be deleted
-bun run dev nuke --workspace "My-Project" --dry-run
+Current state:
 
-# Delete all data for a workspace
-bun run dev nuke --workspace "My-Project"
+- The extension still requires Bun on the user machine.
+- The extension runs the bundled AG Kernel Monitor CLI through Bun.
+- The CLI obviously requires Bun as well.
 
-# Delete a single conversation
-bun run dev nuke --conversation <uuid>
-```
+Can Bun be removed technically?
 
-### Local API
+Yes, but not in the current build. The clean way to remove that requirement is to ship a platform-specific runtime with the extension, for example:
 
-```bash
-# Start API on localhost:3000
-bun run dev serve
+- a precompiled Windows binary
+- a precompiled macOS binary
+- a precompiled Linux binary
 
-# Custom port
-bun run dev serve --port 8080
-```
+That would let the extension run without asking the user to install Bun manually. The current codebase is already structured so that move is practical later.
 
-Endpoints:
+## Compatibility
 
-- `GET /api/workspaces`
-- `GET /api/conversations?workspace=<name>`
-- `GET /api/conversation/<uuid>`
-- `GET /api/health`
+The code is designed for:
 
-## VS Code / Open VSX Sidebar
+- Windows
+- macOS
+- Linux
 
-The repo now includes a VS Code sidebar extension scaffold that reuses the same AG Kernel Monitor model through the bundled CLI.
+Why macOS should work:
 
-What it shows:
+- Antigravity data paths are resolved per platform in `src/paths.ts`
+- workspace URIs are normalized instead of assuming Windows-only paths
+- the sidebar extension reads the same cross-platform JSON model as the CLI
 
-- current conversation
-- workspace details for the active editor or current conversation
-- global brain/cache cleanup view
-- extension settings and runtime info
+Current honesty:
 
-Build the bundled CLI used by the extension:
+- Windows is the primary validation environment right now
+- macOS support is designed in, but not yet validated on a real Mac machine
 
-```bash
-bun run build:vsx-cli
-```
+Expected macOS locations in the current implementation:
 
-Current requirement:
-
-- Bun must still be installed on the machine because the extension runs the bundled CLI with Bun.
-
-Current extension files:
-
-- `vscode/extension.cjs`
-- `vscode/runtime/agk-cli.js`
-- `vscode/media/activity.svg`
-
-## Output Model
-
-Conversation-level output includes:
-
-- `title`
-- `isActive`
-- `lastActiveAt`
-- `mappingSource`
-- `mappingConfidence`
-- `messageCountSource`
-- `estimatedPromptTokens`
-- `estimatedArtifactTokens`
-- `estimatedTotalTokens`
-- `contextRatio`
-- `deltaEstimatedTokens`
-- `whyHeavy`
-
-Workspace-level output includes:
-
-- `activeConversationCount`
-- `largestConversationId`
-- `largestConversationTokens`
-- `mappedConversationCount`
-- `unmappedConversationCount`
+- Antigravity data: `~/.gemini/antigravity/`
+- Electron user data: `~/Library/Application Support/Antigravity/User/`
 
 ## Configuration
 
@@ -184,6 +124,8 @@ You can also pass a config explicitly:
 bun run dev scan --config .ag-kernel.json
 ```
 
+Available keys:
+
 | Key | Default | Description |
 |---|---|---|
 | `bloatLimit` | `1000000` | Estimated token threshold for bloat warnings |
@@ -191,75 +133,11 @@ bun run dev scan --config .ag-kernel.json
 | `dbPath` | `~/.ag-kernel/monitor.db` | SQLite database location |
 | `logLevel` | `info` | Logging verbosity: `debug`, `info`, `warn`, `error` |
 
-## Data Sources
+## Notes
 
-The monitor builds its view from multiple sources:
-
-- `storage.json` for workspace registry data
-- `state.vscdb` for trajectory summaries and session hints
-- `Antigravity.log` for live activity and message-count signals
-- `brain/<uuid>/` for artifact size and mapping clues
-- `annotations/*.pbtxt` for last-view timestamps
-- `conversations/*.pb` for size-based fallback estimation
-
-The scanner prefers stronger signals first and falls back to size-based estimation only when necessary.
-
-## Health States
-
-| Status | Meaning |
-|---|---|
-| `HEALTHY` | Below 50% of bloat limit |
-| `WARNING` | 50% to 80% of bloat limit |
-| `CRITICAL` | Above 80% of bloat limit |
-| `OVER` | Exceeds bloat limit |
-
-## Architecture
-
-```text
-storage.json + state.vscdb + workspaceStorage + logs + .pb/.pbtxt/brain
-  -> normalized workspace registry
-  -> conversation-to-workspace mapping
-  -> estimated context metrics
-  -> SQLite persistence
-  -> CLI views / JSON API / watch mode
-```
-
-## Project Structure
-
-```text
-src/
-  cli/
-    index.ts
-    commands/
-      scan.ts
-      report.ts
-      nuke.ts
-  config.ts
-  paths.ts
-  uri-utils.ts
-  view-models.ts
-  db/
-    schema.ts
-  ingest/
-    storage-json.ts
-    state-vscdb.ts
-    workspace-storage.ts
-    reconciler.ts
-  scanner/
-    conversation-scanner.ts
-    brain-scanner.ts
-  runtime/
-    log-signals.ts
-  metrics/
-    estimator.ts
-    snapshotter.ts
-    health.ts
-  watcher/
-    file-watcher.ts
-    log-tailer.ts
-  server/
-    index.ts
-```
+- Token and context numbers are still estimated unless they come directly from runtime signals.
+- Current conversation detection uses live log signals first and falls back to the most recent session when logs do not confirm a live active one.
+- Remaining unmapped conversations are now diagnosed in the report instead of being left unexplained.
 
 ## License
 
