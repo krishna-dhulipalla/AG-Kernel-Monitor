@@ -1,0 +1,10 @@
+.git/**
+.github/**
+.vscode/**
+.tmp*
+docs/**
+dist/**
+src/**/*.test.ts
+src/**
+tsconfig.json
+bun.lock

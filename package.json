@@ -1,9 +1,97 @@
 {
   "name": "ag-kernel-monitor",
+  "displayName": "AG Kernel Monitor",
+  "publisher": "vamsi",
   "version": "0.1.0",
   "description": "Deep token consumption and cache bloat monitoring for Google Antigravity sessions",
   "type": "module",
-  "main": "src/cli/index.ts",
+  "main": "./vscode/extension.cjs",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onView:agKernelMonitor.sidebar",
+    "onCommand:agKernelMonitor.refresh",
+    "onCommand:agKernelMonitor.openSettings",
+    "onCommand:agKernelMonitor.openOutput"
+  ],
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "agKernelMonitor",
+          "title": "AG Monitor",
+          "icon": "vscode/media/activity.svg"
+        }
+      ]
+    },
+    "views": {
+      "agKernelMonitor": [
+        {
+          "type": "webview",
+          "id": "agKernelMonitor.sidebar",
+          "name": "Kernel Monitor"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "agKernelMonitor.refresh",
+        "title": "AG Kernel Monitor: Refresh"
+      },
+      {
+        "command": "agKernelMonitor.openSettings",
+        "title": "AG Kernel Monitor: Open Settings"
+      },
+      {
+        "command": "agKernelMonitor.openOutput",
+        "title": "AG Kernel Monitor: Open Output"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "agKernelMonitor.refresh",
+          "when": "view == agKernelMonitor.sidebar",
+          "group": "navigation"
+        },
+        {
+          "command": "agKernelMonitor.openSettings",
+          "when": "view == agKernelMonitor.sidebar",
+          "group": "navigation@1"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "AG Kernel Monitor",
+      "properties": {
+        "agKernelMonitor.bunPath": {
+          "type": "string",
+          "default": "bun",
+          "description": "Path to the Bun executable used to run the bundled AG Kernel Monitor CLI."
+        },
+        "agKernelMonitor.cliConfigPath": {
+          "type": "string",
+          "default": "",
+          "description": "Optional path to an AG Kernel Monitor config file. Relative paths resolve from the first workspace folder."
+        },
+        "agKernelMonitor.autoRefreshSeconds": {
+          "type": "number",
+          "default": 20,
+          "minimum": 0,
+          "description": "How often the sidebar refreshes. Set to 0 to disable auto-refresh."
+        },
+        "agKernelMonitor.preferActiveEditorWorkspace": {
+          "type": "boolean",
+          "default": true,
+          "description": "Prefer the workspace containing the active editor when choosing the workspace details panel."
+        }
+      }
+    }
+  },
   "bin": {
     "agk": "src/cli/index.ts"
   },
@@ -11,6 +99,7 @@
     "dev": "bun run src/cli/index.ts",
     "start": "bun run src/cli/index.ts",
     "build": "bun build src/cli/index.ts --outdir dist --target bun",
+    "build:vsx-cli": "bun build src/cli/index.ts --outfile vscode/runtime/agk-cli.js --target bun",
     "test": "bun test"
   },
   "dependencies": {

@@ -113,6 +113,33 @@ Endpoints:
 - `GET /api/conversation/<uuid>`
 - `GET /api/health`
 
+## VS Code / Open VSX Sidebar
+
+The repo now includes a VS Code sidebar extension scaffold that reuses the same AG Kernel Monitor model through the bundled CLI.
+
+What it shows:
+
+- current conversation
+- workspace details for the active editor or current conversation
+- global brain/cache cleanup view
+- extension settings and runtime info
+
+Build the bundled CLI used by the extension:
+
+```bash
+bun run build:vsx-cli
+```
+
+Current requirement:
+
+- Bun must still be installed on the machine because the extension runs the bundled CLI with Bun.
+
+Current extension files:
+
+- `vscode/extension.cjs`
+- `vscode/runtime/agk-cli.js`
+- `vscode/media/activity.svg`
+
 ## Output Model
 
 Conversation-level output includes:
