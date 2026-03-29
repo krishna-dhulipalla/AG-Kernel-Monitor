@@ -42,7 +42,7 @@ export function registerReportCommand(program: Command, db: MonitorDB, config: A
         return;
       }
 
-      console.log(chalk.bold("AG Kernel Monitor - Health Report"));
+      console.log(chalk.bold("Antigravity Token Monitor - Health Report"));
       console.log();
 
       console.log(chalk.bold("Current Risk"));

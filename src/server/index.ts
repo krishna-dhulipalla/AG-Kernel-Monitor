@@ -1,5 +1,5 @@
 /**
- * `agk serve` — JSON API server using Bun.serve().
+ * `agk serve` - JSON API server using Bun.serve().
  */
 
 import { Command } from "commander";
@@ -23,7 +23,7 @@ export function registerServeCommand(program: Command, db: MonitorDB, config: Ag
     .action(async (options) => {
       const port = parseInt(options.port, 10);
 
-      console.log(chalk.dim("🔍 Running initial scan..."));
+      console.log(chalk.dim("Running initial scan..."));
       const stats = await reconcile(db, config);
       console.log(chalk.dim(`   Scanned ${stats.conversationsTotal} conversations`));
       console.log();
@@ -60,7 +60,7 @@ export function registerServeCommand(program: Command, db: MonitorDB, config: Ag
                 ? db.getAllWorkspaces().find(
                     (entry) =>
                       entry.name.toLowerCase() === workspaceName.toLowerCase()
-                      || entry.name.toLowerCase().includes(workspaceName.toLowerCase())
+                      || entry.name.toLowerCase().includes(workspaceName.toLowerCase()),
                   ) ?? null
                 : null;
 
@@ -131,7 +131,7 @@ export function registerServeCommand(program: Command, db: MonitorDB, config: Ag
         },
       });
 
-      console.log(chalk.bold.green(`🚀 AG Kernel Monitor API server running on http://localhost:${port}`));
+      console.log(chalk.bold.green(`Antigravity Token Monitor API server running on http://localhost:${port}`));
       console.log();
       console.log(chalk.dim("Available endpoints:"));
       console.log(chalk.dim(`  GET http://localhost:${port}/api/workspaces`));

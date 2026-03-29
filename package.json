@@ -2,8 +2,8 @@
   "name": "ag-kernel-monitor",
   "displayName": "Antigravity Token Monitor",
   "publisher": "Krishnadhulipalla",
-  "version": "0.1.4",
-  "description": "Token consumption, context bloat, and cache monitoring for AI chat sessions",
+  "version": "1.0.0",
+  "description": "Token consumption, turn growth, context bloat, and cache monitoring for Antigravity sessions",
   "icon": "media/icon.png",
   "type": "module",
   "main": "./vscode/extension.cjs",
@@ -78,7 +78,7 @@
         "agKernelMonitor.cliConfigPath": {
           "type": "string",
           "default": "",
-          "description": "Optional path to an AG Kernel Monitor config file. Relative paths resolve from the first workspace folder."
+          "description": "Optional path to an Antigravity Token Monitor config file. Relative paths resolve from the first workspace folder."
         },
         "agKernelMonitor.autoRefreshSeconds": {
           "type": "number",

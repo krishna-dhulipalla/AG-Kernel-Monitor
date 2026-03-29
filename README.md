@@ -101,11 +101,13 @@ You can also pass a config explicitly in the CLI:
 bun run dev scan --config .ag-kernel.json
 ```
 
-## How AG Kernel Monitor Calculates Things
+## How Antigravity Token Monitor Calculates Things
 
 ### Token Estimates
 
-AG Kernel Monitor uses estimated values unless Antigravity runtime logs expose a direct signal.
+Antigravity Token Monitor uses estimated values unless Antigravity runtime logs expose a direct signal.
+
+It does not proxy, relay, or gateway your Antigravity account traffic. It reads local Antigravity files and runtime metadata on your machine.
 
 - History estimate:
   - prefers direct message count when available
@@ -124,7 +126,7 @@ While monitoring is active:
 
 ### Cache and cleanup management
 
-AG Kernel Monitor scans:
+Antigravity Token Monitor scans:
 
 - conversation `.pb` files
 - brain folders
@@ -170,7 +172,7 @@ If you want to help:
 
 ## Scope
 
-AG Kernel Monitor is currently designed for Antigravity only.
+Antigravity Token Monitor is currently designed for Antigravity only.
 
 ## License
 

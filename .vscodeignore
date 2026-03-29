@@ -12,6 +12,8 @@ scripts/**
 src/**/*.test.ts
 src/**
 test-import.ts
+refactor.py
+update_ui.js
 tsconfig.json
 bun.lock
 vscode/runtime/bin/**

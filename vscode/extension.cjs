@@ -3,7 +3,7 @@ const path = require("path");
 const { AgKernelMonitorRuntime } = require("./monitor-runtime.cjs");
 
 function activate(context) {
-  const output = vscode.window.createOutputChannel("AG Kernel Monitor");
+  const output = vscode.window.createOutputChannel("Antigravity Token Monitor");
   const runtime = new AgKernelMonitorRuntime(context.extensionPath);
   const provider = new AgKernelSidebarProvider(runtime, output);
 

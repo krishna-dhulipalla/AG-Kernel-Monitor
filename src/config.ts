@@ -1,5 +1,5 @@
 /**
- * Configuration loader for AG Kernel Monitor.
+ * Configuration loader for Antigravity Token Monitor.
  *
  * Searches for `.ag-kernel.json` in:
  *   1. Current working directory (project root)

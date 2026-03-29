@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 /**
- * AG Kernel Monitor — CLI entry point.
+ * Antigravity Token Monitor - CLI entry point.
  *
  * Usage:
  *   agk scan                     One-shot scan and display
@@ -42,17 +42,14 @@ program
   .option("--config <path>", "Path to .ag-kernel.json config file")
   .option("--json", "Output raw JSON instead of formatted tables");
 
-// Load config and create DB connection (shared across commands)
 const config = loadConfig(getConfigPathFromArgv(process.argv));
 const db = new MonitorDB(config.dbPath);
 
-// Register subcommands
 registerScanCommand(program, db, config);
 registerReportCommand(program, db, config);
 registerNukeCommand(program, db, config);
 registerServeCommand(program, db, config);
 
-// Ensure DB is closed on exit
 process.on("exit", () => {
   db.close();
 });
