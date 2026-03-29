@@ -3,6 +3,7 @@ import { type Conversation, MonitorDB, type Workspace } from "./db/schema";
 import { explainWhyHeavy, formatBytes, formatRatio, formatTokens } from "./metrics/estimator";
 import { assessHealth, assessWorkspaceHealth } from "./metrics/health";
 import { getLatestDeltaTokens } from "./metrics/snapshotter";
+import { scanLatestLogFile } from "./runtime/log-signals";
 import { isPlaygroundUri, normalizeWorkspaceUri } from "./uri-utils";
 
 export interface ConversationViewModel {
@@ -64,8 +65,10 @@ export interface WorkspaceViewModel {
 
 export interface CurrentConversationResult {
   mode: "active" | "recent" | "none";
-  detectionSource: "log" | "active_flag" | "recent_fallback" | "none";
+  detectionSource: "log" | "active_flag" | "active_pb_write" | "recent_fallback" | "unresolved_log_uuid" | "none";
+  resolutionState: "active_log" | "active_pb_write" | "recent_fallback" | "unresolved_log_uuid" | "none";
   detectionNote: string;
+  resolutionNote: string;
   conversation: ConversationViewModel | null;
 }
 
@@ -235,24 +238,42 @@ export function listWorkspaceViewModels(db: MonitorDB, config: AgKernelConfig): 
 }
 
 export function getCurrentConversationView(db: MonitorDB, config: AgKernelConfig): CurrentConversationResult {
+  const logSignals = scanLatestLogFile();
   const activeConversation = db.getAllConversations().find((conversation) => conversation.is_active === 1) ?? null;
   if (activeConversation) {
+    const activeView = buildConversationViewModel(db, config, activeConversation);
+    const source = activeConversation.activity_source === "log" ? "log" : "active_pb_write";
+    const note = activeConversation.activity_source === "log"
+      ? "Detected from Antigravity runtime log activity."
+      : "Detected from the latest conversation activity signal.";
     return {
       mode: "active",
-      detectionSource: activeConversation.activity_source === "log" ? "log" : "active_flag",
-      detectionNote: activeConversation.activity_source === "log"
-        ? "Detected from Antigravity runtime log activity."
-        : "Marked active from the latest runtime signal.",
-      conversation: buildConversationViewModel(db, config, activeConversation),
+      detectionSource: source,
+      resolutionState: activeConversation.activity_source === "log" ? "active_log" : "active_pb_write",
+      detectionNote: note,
+      resolutionNote: note,
+      conversation: activeView,
     };
   }
 
   const mostRecentConversation = db.getCurrentConversation();
+  if (logSignals.activeConversationId && !db.getConversation(logSignals.activeConversationId)) {
+    return {
+      mode: mostRecentConversation ? "recent" : "none",
+      detectionSource: "unresolved_log_uuid",
+      resolutionState: "unresolved_log_uuid",
+      detectionNote: `Logs pointed to ${logSignals.activeConversationId}, but that conversation is not present locally. Showing the most recent local session instead.`,
+      resolutionNote: `Logs pointed to ${logSignals.activeConversationId}, but that conversation is not present locally. Showing the most recent local session instead.`,
+      conversation: mostRecentConversation ? buildConversationViewModel(db, config, mostRecentConversation) : null,
+    };
+  }
   if (mostRecentConversation) {
     return {
       mode: "recent",
       detectionSource: "recent_fallback",
+      resolutionState: "recent_fallback",
       detectionNote: "No live active conversation could be confirmed from logs, so the most recent session is shown instead.",
+      resolutionNote: "No live active conversation could be confirmed from logs, so the most recent session is shown instead.",
       conversation: buildConversationViewModel(db, config, mostRecentConversation),
     };
   }
@@ -260,7 +281,9 @@ export function getCurrentConversationView(db: MonitorDB, config: AgKernelConfig
   return {
     mode: "none",
     detectionSource: "none",
+    resolutionState: "none",
     detectionNote: "No conversation data is available yet.",
+    resolutionNote: "No conversation data is available yet.",
     conversation: null,
   };
 }

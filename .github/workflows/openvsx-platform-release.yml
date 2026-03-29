@@ -30,22 +30,12 @@ jobs:
       - name: Check extension syntax
         run: node --check vscode/extension.cjs
 
-      - name: Build Bun fallback bundle
-        run: bun run build:vsx-cli
+      - name: Check monitor runtime syntax
+        run: node --check vscode/monitor-runtime.cjs
 
-  package-platform:
+  package-universal:
     needs: validate
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        vscode_target:
-          - win32-x64
-          - win32-arm64
-          - darwin-x64
-          - darwin-arm64
-          - linux-x64
-          - linux-arm64
 
     steps:
       - name: Checkout
@@ -62,17 +52,11 @@ jobs:
       - name: Install dependencies
         run: bun install
 
-      - name: Build bundled Bun fallback
-        run: bun run build:vsx-cli
-
-      - name: Build native runtime for target
-        run: bun run scripts/build-platform-binaries.ts ${{ matrix.vscode_target }}
-
       - name: Package VSIX
-        run: npx @vscode/vsce package --target ${{ matrix.vscode_target }} --out artifacts/ag-kernel-monitor-${{ matrix.vscode_target }}.vsix
+        run: npx @vscode/vsce package --out artifacts/ag-kernel-monitor.vsix
 
       - name: Upload VSIX artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ag-kernel-monitor-${{ matrix.vscode_target }}
-          path: artifacts/ag-kernel-monitor-${{ matrix.vscode_target }}.vsix
+          name: ag-kernel-monitor
+          path: artifacts/ag-kernel-monitor.vsix

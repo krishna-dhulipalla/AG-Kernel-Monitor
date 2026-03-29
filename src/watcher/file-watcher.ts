@@ -1,8 +1,12 @@
 /**
  * File watcher - monitors conversations/ for .pb size changes.
+ *
+ * `fs.watch()` has been unreliable on Windows/Antigravity setups, especially
+ * when large protobuf files are rewritten rapidly. Polling the file sizes is
+ * slower in theory but materially more reliable for this tool's live mode.
  */
 
-import { existsSync, statSync, watch } from "fs";
+import { existsSync, readdirSync, statSync } from "fs";
 import { basename, extname, join } from "path";
 import chalk from "chalk";
 import type { MonitorDB } from "../db/schema";
@@ -12,7 +16,7 @@ import { takeSnapshotIfChanged } from "../metrics/snapshotter";
 import { getConversationsDir } from "../paths";
 import { ensureConversationLoaded } from "./reconcile-helper";
 
-const DEBOUNCE_MS = 500;
+const POLL_INTERVAL_MS = 1000;
 
 export function startFileWatcher(db: MonitorDB, config: AgKernelConfig): void {
   const conversationsDir = getConversationsDir();
@@ -22,31 +26,71 @@ export function startFileWatcher(db: MonitorDB, config: AgKernelConfig): void {
     return;
   }
 
-  const debounceTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  const knownSizes = new Map<string, number>();
 
   try {
-    const watcher = watch(conversationsDir, (_eventType, filename) => {
-      if (!filename || extname(filename) !== ".pb") return;
-
-      const existing = debounceTimers.get(filename);
-      if (existing) clearTimeout(existing);
-
-      debounceTimers.set(
-        filename,
-        setTimeout(() => {
-          debounceTimers.delete(filename);
-          void handlePbChange(db, config, conversationsDir, filename);
-        }, DEBOUNCE_MS),
-      );
-    });
-
-    watcher.on("error", (err) => {
-      console.error(chalk.red("File watcher error:"), err.message);
-    });
-
-    console.log(chalk.dim(`   Watching: ${conversationsDir}`));
+    for (const file of readdirSync(conversationsDir)) {
+      if (extname(file) !== ".pb") continue;
+      const filePath = join(conversationsDir, file);
+      try {
+        knownSizes.set(file, statSync(filePath).size);
+      } catch {
+        continue;
+      }
+    }
   } catch (err) {
-    console.error(chalk.red("Failed to start file watcher:"), err);
+    console.error(chalk.red("Failed to prime file watcher:"), err);
+    return;
+  }
+
+  const timer = setInterval(() => {
+    void pollConversationFiles(db, config, conversationsDir, knownSizes);
+  }, POLL_INTERVAL_MS);
+
+  process.once("exit", () => clearInterval(timer));
+  console.log(chalk.dim(`   Watching: ${conversationsDir}`));
+}
+
+async function pollConversationFiles(
+  db: MonitorDB,
+  config: AgKernelConfig,
+  conversationsDir: string,
+  knownSizes: Map<string, number>,
+): Promise<void> {
+  try {
+    const seen = new Set<string>();
+    for (const file of readdirSync(conversationsDir)) {
+      if (extname(file) !== ".pb") continue;
+      const filePath = join(conversationsDir, file);
+      seen.add(file);
+
+      let currentSize: number;
+      try {
+        currentSize = statSync(filePath).size;
+      } catch {
+        continue;
+      }
+
+      const previousSize = knownSizes.get(file);
+      if (previousSize === undefined) {
+        knownSizes.set(file, currentSize);
+        await handlePbChange(db, config, conversationsDir, file, 0);
+        continue;
+      }
+
+      if (previousSize !== currentSize) {
+        knownSizes.set(file, currentSize);
+        await handlePbChange(db, config, conversationsDir, file, previousSize);
+      }
+    }
+
+    for (const file of Array.from(knownSizes.keys())) {
+      if (!seen.has(file)) {
+        knownSizes.delete(file);
+      }
+    }
+  } catch {
+    // Ignore transient directory read failures during rapid writes.
   }
 }
 
@@ -55,6 +99,7 @@ async function handlePbChange(
   config: AgKernelConfig,
   conversationsDir: string,
   filename: string,
+  previousBytes?: number,
 ): Promise<void> {
   const filePath = join(conversationsDir, filename);
   const conversationId = basename(filename, ".pb");
@@ -72,7 +117,8 @@ async function handlePbChange(
     }
 
     const currentBytes = statSync(filePath).size;
-    const deltaBytes = currentBytes - conversation.pb_file_bytes;
+    const baselineBytes = previousBytes ?? conversation.pb_file_bytes;
+    const deltaBytes = currentBytes - baselineBytes;
     if (deltaBytes === 0) {
       return;
     }

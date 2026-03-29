@@ -2,7 +2,7 @@
  * Log tailer - polls the latest Antigravity.log for active-session runtime signals.
  */
 
-import { existsSync, readFileSync, statSync } from "fs";
+import { closeSync, existsSync, openSync, readSync, statSync } from "fs";
 import chalk from "chalk";
 import type { MonitorDB } from "../db/schema";
 import type { AgKernelConfig } from "../config";
@@ -15,6 +15,12 @@ interface LogTailState {
   filePath: string | null;
   offset: number;
   currentConversationId: string | null;
+}
+
+interface ChatRunState {
+  nextChatIndex: number;
+  currentRunStartTokens: number;
+  lastMessageCount: number | null;
 }
 
 export function startLogTailer(db: MonitorDB, config: AgKernelConfig): void {
@@ -33,10 +39,11 @@ export function startLogTailer(db: MonitorDB, config: AgKernelConfig): void {
       : 0,
     currentConversationId: initialSnapshot.activeConversationId,
   };
+  const chatRunStates = new Map<string, ChatRunState>();
 
   const poll = async () => {
     await refreshLatestLogFile(state);
-    await processNewLines(db, config, state);
+    await processNewLines(db, config, state, chatRunStates);
   };
 
   const timer = setInterval(() => {
@@ -61,7 +68,12 @@ async function refreshLatestLogFile(state: LogTailState): Promise<void> {
   console.log(chalk.dim(`   Tailing: ${latestPath}`));
 }
 
-async function processNewLines(db: MonitorDB, config: AgKernelConfig, state: LogTailState): Promise<void> {
+async function processNewLines(
+  db: MonitorDB,
+  config: AgKernelConfig,
+  state: LogTailState,
+  chatRunStates: Map<string, ChatRunState>,
+): Promise<void> {
   try {
     if (!state.filePath || !existsSync(state.filePath)) {
       return;
@@ -75,8 +87,7 @@ async function processNewLines(db: MonitorDB, config: AgKernelConfig, state: Log
       return;
     }
 
-    const content = readFileSync(state.filePath, "utf-8");
-    const newContent = content.slice(state.offset);
+    const newContent = readAppendedText(state.filePath, state.offset, stats.size);
     state.offset = stats.size;
 
     for (const line of newContent.split(/\r?\n/)) {
@@ -132,12 +143,14 @@ async function processNewLines(db: MonitorDB, config: AgKernelConfig, state: Log
       const timestamp = new Date().toLocaleTimeString();
       const deltaLabel = deltaMessages !== null ? ` (+${deltaMessages} since last)` : "";
       const title = updatedConversation.title ? ` ${chalk.dim(`"${updatedConversation.title}"`)}` : "";
+      const chatSummary = formatChatSummary(chatRunStates, updatedConversation.id, newCount, updatedConversation.estimated_tokens);
 
       console.log(
         chalk.dim(`[${timestamp}]`) +
         chalk.magenta(" [LIVE]") +
         ` ${updatedConversation.id.slice(0, 12)}...${title}` +
         ` now at ${chalk.bold(String(newCount))} direct messages${deltaLabel}` +
+        `${chatSummary ? ` | ${chatSummary}` : ""}` +
         ` -> ${formatTokens(updatedConversation.estimated_tokens)} estimated tokens` +
         ` (${formatRatio(ratio)} of limit)`,
       );
@@ -145,4 +158,51 @@ async function processNewLines(db: MonitorDB, config: AgKernelConfig, state: Log
   } catch {
     // Ignore transient watcher read failures.
   }
+}
+
+function readAppendedText(filePath: string, offset: number, nextSize: number): string {
+  const length = Math.max(0, nextSize - offset);
+  if (length === 0) {
+    return "";
+  }
+
+  const fileHandle = openSync(filePath, "r");
+  try {
+    const buffer = Buffer.alloc(length);
+    const bytesRead = readSync(fileHandle, buffer, 0, length, offset);
+    return buffer.subarray(0, bytesRead).toString("utf-8");
+  } finally {
+    closeSync(fileHandle);
+  }
+}
+
+function formatChatSummary(
+  chatRunStates: Map<string, ChatRunState>,
+  conversationId: string,
+  newMessageCount: number,
+  estimatedTokens: number,
+): string {
+  const existing = chatRunStates.get(conversationId);
+  if (!existing) {
+    chatRunStates.set(conversationId, {
+      nextChatIndex: 0,
+      currentRunStartTokens: estimatedTokens,
+      lastMessageCount: newMessageCount,
+    });
+    return "";
+  }
+
+  if (existing.lastMessageCount === null || newMessageCount <= existing.lastMessageCount) {
+    existing.lastMessageCount = newMessageCount;
+    return "";
+  }
+
+  const completedChatIndex = existing.nextChatIndex;
+  const deltaTokens = estimatedTokens - existing.currentRunStartTokens;
+  const summary = `chat ${completedChatIndex}: ${formatTokens(existing.currentRunStartTokens)} -> ${formatTokens(estimatedTokens)} (${deltaTokens >= 0 ? "+" : "-"}${formatTokens(Math.abs(deltaTokens))})`;
+
+  existing.nextChatIndex += 1;
+  existing.currentRunStartTokens = estimatedTokens;
+  existing.lastMessageCount = newMessageCount;
+  return summary;
 }

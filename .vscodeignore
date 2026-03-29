@@ -6,9 +6,13 @@
 docs/**
 dist/**
 node_modules/**
+!node_modules/sql.js/package.json
+!node_modules/sql.js/dist/**
 scripts/**
 src/**/*.test.ts
 src/**
 test-import.ts
 tsconfig.json
 bun.lock
+vscode/runtime/bin/**
+vscode/runtime/agk-cli.js

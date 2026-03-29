@@ -71,7 +71,7 @@ export function registerScanCommand(program: Command, db: MonitorDB, config: AgK
 
       if (watchMode) {
         console.log(chalk.yellow("Watch mode - press Ctrl+C to exit"));
-        console.log(chalk.dim("   Live watch focuses on the current conversation only."));
+        console.log(chalk.dim("   Live watch streams new conversation growth and runtime signals as they happen."));
         console.log(chalk.dim("   Run `agk scan` when you want the full workspace history and cleanup summary."));
         console.log();
         displayCurrentConversation(db, config, false);
@@ -266,14 +266,18 @@ function displayConversationDetail(db: MonitorDB, config: AgKernelConfig, conver
   const currentContext: CurrentConversationResult = view.isActive
     ? {
         mode: "active",
-        detectionSource: "active_flag",
-        detectionNote: "Marked active from the latest runtime signal.",
+        detectionSource: "active_pb_write",
+        resolutionState: "active_pb_write",
+        detectionNote: "Detected from the latest runtime signal.",
+        resolutionNote: "Detected from the latest runtime signal.",
         conversation: view,
       }
     : {
         mode: "recent",
         detectionSource: "recent_fallback",
+        resolutionState: "recent_fallback",
         detectionNote: "Direct conversation lookup does not imply this is the current live session.",
+        resolutionNote: "Direct conversation lookup does not imply this is the current live session.",
         conversation: view,
       };
 

@@ -1,14 +1,13 @@
 import { spawn } from "child_process";
+import { join } from "path";
 
-const command = process.platform === "win32" ? "npx.cmd" : "npx";
-const args = ["@vscode/vsce", "package"];
-
-const child = spawn(command, args, {
+const vsceEntry = join(process.cwd(), "node_modules", "@vscode", "vsce", "vsce");
+const nodeCommand = process.platform === "win32" ? "node.exe" : "node";
+const child = spawn(nodeCommand, [vsceEntry, "package"], {
   cwd: process.cwd(),
   env: process.env,
   stdio: "inherit",
   windowsHide: true,
-  shell: process.platform === "win32",
 });
 
 child.on("exit", (code) => {

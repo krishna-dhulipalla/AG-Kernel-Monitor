@@ -8,6 +8,7 @@
  */
 
 import { readFileSync, existsSync } from "fs";
+import { createHash } from "crypto";
 import { getStorageJsonPath } from "../paths";
 import { extractWorkspaceNameFromUri, normalizeWorkspaceUri } from "../uri-utils";
 
@@ -152,7 +153,5 @@ export function parseStorageJson(customPath?: string): StorageJsonResult | null 
  * Uses the same hashing approach VS Code uses for workspaceStorage folder names.
  */
 function generateWorkspaceHash(uri: string): string {
-  const hasher = new Bun.CryptoHasher("md5");
-  hasher.update(uri);
-  return hasher.digest("hex");
+  return createHash("md5").update(uri).digest("hex");
 }
