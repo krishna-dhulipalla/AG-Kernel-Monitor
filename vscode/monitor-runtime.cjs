@@ -266,7 +266,7 @@ function safeJsonParse(text) {
 
 function loadMonitorConfig(configPath) {
   const defaults = {
-    bloatLimit: 1_000_000,
+    bloatLimit: 3_000_000,
     bytesPerToken: 3.5,
   };
 
@@ -1408,22 +1408,56 @@ class AgKernelMonitorRuntime {
     });
 
     const conversationIndex = indexById(allConversations);
+    const currentConversationState = snapshot.currentConversation.conversation
+      ? this.liveState.chatRuns.get(snapshot.currentConversation.conversation.id) || null
+      : null;
+    const currentConversationView = snapshot.currentConversation.conversation
+      ? conversationIndex.get(snapshot.currentConversation.conversation.id) || snapshot.currentConversation.conversation
+      : null;
+    const observedTurnCount = currentConversationState ? currentConversationState.observedCompletedTurns : 0;
+    const avgTokensPerObservedTurn = observedTurnCount > 0
+      ? Math.round(currentConversationState.observedTokensAdded / observedTurnCount)
+      : null;
+    const avgDirectMessagesPerObservedTurn = observedTurnCount > 0
+      ? currentConversationState.observedDirectMessages / observedTurnCount
+      : null;
+    const currentTurnDirectMessages = currentConversationView && currentConversationState
+      && currentConversationView.messageCount !== null
+      && currentConversationState.currentRunStartMessageCount !== null
+      ? Math.max(0, currentConversationView.messageCount - currentConversationState.currentRunStartMessageCount)
+      : null;
+    const lastObservedTurn = currentConversationState && currentConversationState.recentRuns.length > 0
+      ? currentConversationState.recentRuns[0]
+      : null;
+    const lastFiveTurnsTokens = currentConversationState
+      ? currentConversationState.recentRuns.reduce((sum, run) => sum + run.deltaTokens, 0)
+      : 0;
     const currentConversation = snapshot.currentConversation.conversation
       ? {
-          ...conversationIndex.get(snapshot.currentConversation.conversation.id),
+          ...currentConversationView,
           resolutionState: snapshot.currentConversation.resolutionState,
           resolutionNote: snapshot.currentConversation.resolutionNote,
           latestDelta: latestDeltas.get(snapshot.currentConversation.conversation.id)?.deltaTokens || 0,
-          currentChatRun: this.liveState.chatRuns.get(snapshot.currentConversation.conversation.id)
+          currentChatRun: currentConversationState
             ? {
-                chatIndex: this.liveState.chatRuns.get(snapshot.currentConversation.conversation.id).nextChatIndex,
-                fromTokens: this.liveState.chatRuns.get(snapshot.currentConversation.conversation.id).currentRunStartTokens,
-                toTokens: conversationIndex.get(snapshot.currentConversation.conversation.id)?.estimatedTotalTokens || snapshot.currentConversation.conversation.estimatedTotalTokens,
-                deltaTokens: this.liveState.chatRuns.get(snapshot.currentConversation.conversation.id).currentRunDeltaTokens,
-                startedAt: this.liveState.chatRuns.get(snapshot.currentConversation.conversation.id).currentRunStartedAt,
+                chatIndex: currentConversationState.nextChatIndex,
+                fromTokens: currentConversationState.currentRunStartTokens,
+                toTokens: currentConversationView.estimatedTotalTokens,
+                deltaTokens: currentConversationState.currentRunDeltaTokens,
+                startedAt: currentConversationState.currentRunStartedAt,
               }
             : null,
-          recentChatRuns: this.liveState.chatRuns.get(snapshot.currentConversation.conversation.id)?.recentRuns || [],
+          recentChatRuns: currentConversationState?.recentRuns || [],
+          observedTurnCount,
+          currentTurnDirectMessages,
+          avgTokensPerObservedTurn,
+          avgTokensPerObservedTurnFormatted: avgTokensPerObservedTurn !== null ? formatTokens(avgTokensPerObservedTurn) : "unknown",
+          avgDirectMessagesPerObservedTurn,
+          avgDirectMessagesPerObservedTurnFormatted: avgDirectMessagesPerObservedTurn !== null ? avgDirectMessagesPerObservedTurn.toFixed(avgDirectMessagesPerObservedTurn >= 10 ? 0 : 1) : "unknown",
+          lastObservedTurnTokens: lastObservedTurn ? lastObservedTurn.deltaTokens : null,
+          lastObservedTurnTokensFormatted: lastObservedTurn ? `${lastObservedTurn.deltaTokens >= 0 ? "+" : "-"}${formatTokens(Math.abs(lastObservedTurn.deltaTokens))}` : "none",
+          lastFiveTurnsTokens,
+          lastFiveTurnsTokensFormatted: `${lastFiveTurnsTokens >= 0 ? "+" : "-"}${formatTokens(Math.abs(lastFiveTurnsTokens))}`,
         }
       : null;
 
@@ -1431,6 +1465,15 @@ class AgKernelMonitorRuntime {
       ? {
           ...snapshot.workspaceDetail,
           conversations: snapshot.workspaceDetail.conversations.map((conversation) => conversationIndex.get(conversation.id) || conversation),
+          currentSessionShareFormatted: currentConversation && snapshot.workspaceDetail.estimatedTokens > 0 && snapshot.workspaceDetail.id === currentConversation.workspaceId
+            ? formatRatio(currentConversation.estimatedTotalTokens / snapshot.workspaceDetail.estimatedTokens)
+            : null,
+          currentSessionLastTurnTokensFormatted: currentConversation && snapshot.workspaceDetail.id === currentConversation.workspaceId
+            ? currentConversation.lastObservedTurnTokensFormatted
+            : null,
+          currentSessionLastFiveTurnsTokensFormatted: currentConversation && snapshot.workspaceDetail.id === currentConversation.workspaceId
+            ? currentConversation.lastFiveTurnsTokensFormatted
+            : null,
         }
       : null;
 
@@ -1788,8 +1831,10 @@ class AgKernelMonitorRuntime {
         deltaEstimatedTokens: chatRun ? chatRun.currentRunDeltaTokens : (latestDelta ? latestDelta.deltaTokens : 0),
         deltaEstimatedTokensFormatted: `+${formatTokens(Math.abs(chatRun ? chatRun.currentRunDeltaTokens : (latestDelta ? latestDelta.deltaTokens : 0)))}`,
         historicalRuns: chatRun ? chatRun.recentRuns.map(r => ({
+           chatIndex: r.chatIndex,
            messageCount: r.messageCount,
-           deltaTokensFormatted: `+${formatTokens(r.deltaTokens)}`,
+           directMessages: r.directMessages,
+           deltaTokensFormatted: `${r.deltaTokens >= 0 ? "+" : "-"}${formatTokens(Math.abs(r.deltaTokens))}`,
            fromTokensFormatted: formatTokens(r.fromTokens),
            toTokensFormatted: formatTokens(r.toTokens),
            completedAtRelative: relativeTime(r.completedAt)
@@ -2020,10 +2065,14 @@ function ensureChatRunState(liveState, conversationId, currentTokens) {
   const created = {
     nextChatIndex: 0,
     currentRunStartTokens: currentTokens,
+    currentRunStartMessageCount: null,
     currentRunDeltaTokens: 0,
     currentRunStartedAt: null,
     lastMessageCount: null,
     recentRuns: [],
+    observedCompletedTurns: 0,
+    observedTokensAdded: 0,
+    observedDirectMessages: 0,
   };
   liveState.chatRuns.set(conversationId, created);
   return created;
@@ -2046,6 +2095,7 @@ function recordChatBoundary(liveState, conversationId, messageCount, totalTokens
   if (state.lastMessageCount === null) {
     state.lastMessageCount = messageCount;
     state.currentRunStartTokens = totalTokens;
+    state.currentRunStartMessageCount = messageCount;
     state.currentRunDeltaTokens = 0;
     state.currentRunStartedAt = timestamp;
     return null;
@@ -2053,9 +2103,16 @@ function recordChatBoundary(liveState, conversationId, messageCount, totalTokens
 
   if (messageCount <= state.lastMessageCount) {
     state.lastMessageCount = messageCount;
+    state.currentRunStartMessageCount = messageCount;
+    state.currentRunStartTokens = totalTokens;
+    state.currentRunDeltaTokens = 0;
+    state.currentRunStartedAt = timestamp;
     return null;
   }
 
+  const directMessages = state.currentRunStartMessageCount !== null
+    ? Math.max(0, messageCount - state.currentRunStartMessageCount)
+    : Math.max(0, messageCount - state.lastMessageCount);
   const completed = {
     chatIndex: state.nextChatIndex,
     startedAt: state.currentRunStartedAt,
@@ -2064,12 +2121,17 @@ function recordChatBoundary(liveState, conversationId, messageCount, totalTokens
     toTokens: totalTokens,
     deltaTokens: totalTokens - state.currentRunStartTokens,
     messageCount,
+    directMessages,
   };
 
   state.recentRuns = [completed, ...state.recentRuns].slice(0, 5);
+  state.observedCompletedTurns += 1;
+  state.observedTokensAdded += completed.deltaTokens;
+  state.observedDirectMessages += directMessages;
   state.nextChatIndex += 1;
   state.lastMessageCount = messageCount;
   state.currentRunStartTokens = totalTokens;
+  state.currentRunStartMessageCount = messageCount;
   state.currentRunDeltaTokens = 0;
   state.currentRunStartedAt = timestamp;
   return completed;

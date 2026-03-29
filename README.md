@@ -1,42 +1,44 @@
-# Antigravity Context Monitor
+# Antigravity Token Monitor
 
-**Antigravity Context Monitor** is a precise telemetry tool for monitoring token consumption, context window usage, and cache bloat during Google Antigravity conversations.
+**Antigravity Token Monitor** is a precise telemetry tool specifically designed for tracing token accumulations, observing live interaction runs, and scaling with Google Antigravity conversations.
 
 <div align="center">
   <!-- TODO: Replace with an actual screenshot of the extension sidebar -->
-  <img src="media/screenshot-placeholder.png" alt="Antigravity Context Monitor Sidebar" width="650" />
+  <img src="media/screenshot-placeholder.png" alt="Antigravity Token Monitor Sidebar" width="650" />
 </div>
 
 ## Overview
 
-AI chats can quickly accumulate massive context windows, leading to slower responses and potential performance degradation. This tool provides real-time visibility into your session's health straight from your editor's sidebar or terminal.
+Modern AI interactions often involve sending massive context sets back to the model, which can rapidly increase token expenditures and slow down responsiveness. This extension provides real-time visibility into your session's telemetry directly from your editor's sidebar or terminal.
 
-It helps you answer four practical questions:
+> **Note**: This is a telemetry and analytics tool, *not* a strict quota-enforcement or limit monitor. It enables understanding of token pacing to optimize runs rather than locking you out of your workflow.
 
-- **How much context has this session built up so far?**
-- **How much did the latest turn add to the conversation?**
-- **Which conversations are getting too large and need pruning?**
-- **Which cache or brain artifacts are orphaned and worth cleaning up?**
+It helps you answer practical questions:
+
+- **How many tokens has this session accumulated in total?**
+- **How many tokens were generated and tracked during the current turn?**
+- **What is the average token density across recent interactions?**
+- **Which workspaces are dominating your local storage space through cached assets?**
 
 The primary experience is the **VS Code sidebar extension**. A fully-featured **CLI** is also included for direct inspection and automation.
 
 ## What It Shows
 
-- Current conversation status and estimated total context
+- Granular turn-level token additions and message metrics
+- Cumulative session total tokens and history scale
 - Live session growth while Antigravity is running
-- Workspace-level conversation summaries
+- Workspace-level conversation token summaries
 - Brain and cache cleanup targets
-- Unmapped and orphaned artifacts that need investigation
 
 ## Install
 
 ### Preferred: Open VSX extension
 
-Install `Antigravity Context Monitor` from Open VSX inside VS Code or compatible editors.
+Install `Antigravity Token Monitor` from Open VSX inside VS Code or compatible editors.
 
 After install:
 
-1. Open the `AG Context` sidebar
+1. Open the `AG Token` sidebar
 2. Keep the sidebar visible while using Antigravity if you want live updates
 3. Use VS Code settings if you want to change refresh behavior or config path
 
@@ -47,7 +49,7 @@ If you already have a `.vsix`:
 1. Open Extensions
 2. Open the `...` menu
 3. Choose `Install from VSIX...`
-4. Select the Antigravity Context Monitor package
+4. Select the Antigravity Token Monitor package
 
 ### CLI fallback
 
@@ -86,7 +88,7 @@ Create `.ag-kernel.json` in your project root or home directory:
 
 ```json
 {
-  "bloatLimit": 1000000,
+  "bloatLimit": 3000000,
   "bytesPerToken": 3.5,
   "dbPath": "~/.ag-kernel/monitor.db",
   "logLevel": "info"
@@ -101,26 +103,24 @@ bun run dev scan --config .ag-kernel.json
 
 ## How AG Kernel Monitor Calculates Things
 
-### Token and context estimates
+### Token Estimates
 
 AG Kernel Monitor uses estimated values unless Antigravity runtime logs expose a direct signal.
 
-- Prompt/history estimate:
+- History estimate:
   - prefers direct message count when available
   - otherwise estimates from conversation `.pb` size using `bytesPerToken`
 - Artifact estimate:
   - derived from brain folder size
   - adjusted with resolved brain versions
-- Estimated total context:
-  - prompt/history estimate + artifact estimate
 
-### Live growth
+### Live Turn Growth
 
 While monitoring is active:
 
 - `.pb` file growth shows how the conversation data is changing
-- runtime log signals can attach direct message counts to the same session
-- the sidebar and watch mode show the latest added amount and current total context
+- runtime log signals attach direct message counts to individual interaction turns
+- the sidebar and watch mode isolate the *current turn delta* from the *session total*
 
 ### Cache and cleanup management
 
@@ -131,13 +131,6 @@ AG Kernel Monitor scans:
 - annotation files
 - Antigravity runtime logs
 - Antigravity state metadata
-
-It uses those sources to highlight:
-
-- oversized conversations
-- unmapped conversations
-- orphan brain folders
-- orphan annotation files
 
 ## Compatibility
 
@@ -151,7 +144,7 @@ The current primary validation environment is Windows.
 
 - Live monitoring runs only while the sidebar is visible
 - If live activity cannot be confirmed from logs, the monitor falls back to the most recent conversation
-- Historical per-chat breakdown is not reconstructed retroactively; live per-chat tracking starts when monitoring observes the session
+- Historical per-chat breakdowns are not reconstructed retroactively; live per-chat tracking starts when monitoring observes the session turn
 
 ## Reporting Issues
 
@@ -178,8 +171,6 @@ If you want to help:
 ## Scope
 
 AG Kernel Monitor is currently designed for Antigravity only.
-
-The architecture can be extended later to other local AI coding tools such as Claude-based workflows, but that is not the current product scope.
 
 ## License
 

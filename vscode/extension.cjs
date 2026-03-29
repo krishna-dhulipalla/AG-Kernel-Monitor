@@ -275,7 +275,7 @@ function renderOverview(snapshot, current) {
   const tone = toneClass(current?.healthTone || "neutral");
   return `
     ${renderTreeItem(SVGS.pulse, "State", formatResolutionLabel(overview.resolutionState), "", tone)}
-    ${renderTreeItem(SVGS.graph, "Session Total", current ? `${current.estimatedTotalTokensFormatted} (${current.contextRatioFormatted})` : "0")}
+    ${renderTreeItem(SVGS.graph, "Session Total Tokens", current ? `${current.estimatedTotalTokensFormatted}` : "0")}
     ${renderTreeItem(SVGS.link, "Mapped workspaces", `${overview.mappedConversations}/${overview.totalConversations}`)}
     ${renderTreeItem(SVGS.info, "Unmapped sessions", String(overview.unmappedConversations))}
   `;
@@ -286,10 +286,16 @@ function renderCurrentConversation(snapshot, current) {
   const label = current.title || "Untitled";
   return `
     ${renderTreeItem(SVGS.folder, label, "", current.healthTone === "neutral" ? "" : current.health, current.healthTone)}
-    ${renderTreeItem(SVGS.graph, "Session Total", `${current.estimatedTotalTokensFormatted} (${current.contextRatioFormatted})`)}
-    ${renderTreeItem(SVGS.pulse, "Current Turn Added", current.deltaEstimatedTokensFormatted || "+0")}
-    ${renderTreeItem(SVGS.time, "Last Active", current.lastActiveRelative || "unknown")}
-    ${renderTreeItem(SVGS.info, "Direct Messages", current.messageCount !== null ? `${current.messageCount}${current.messageCountSource ? ` (${current.messageCountSource})` : ""}` : "unknown")}
+    ${renderTreeItem("", "Session Total Tokens", `${current.estimatedTotalTokensFormatted}`)}
+    ${renderTreeItem("", "Tokens Added This Turn", current.deltaEstimatedTokensFormatted || "+0")}
+    ${renderTreeItem("", "Last Observed Turn", current.lastObservedTurnTokensFormatted || "none")}
+    ${renderTreeItem("", "Tokens Added In Last 5 Turns", current.lastFiveTurnsTokensFormatted || "+0")}
+    ${renderTreeItem("", "Last Active", current.lastActiveRelative || "unknown")}
+    ${renderTreeItem("", "Session Direct Messages", current.messageCount !== null ? `${current.messageCount}${current.messageCountSource ? ` (${current.messageCountSource})` : ""}` : "unknown")}
+    ${renderTreeItem("", "Direct Messages This Turn", current.currentTurnDirectMessages !== null ? String(current.currentTurnDirectMessages) : "unknown")}
+    ${renderTreeItem("", "Observed Turns", String(current.observedTurnCount || 0))}
+    ${renderTreeItem("", "Avg Tokens / Observed Turn", current.avgTokensPerObservedTurnFormatted || "unknown")}
+    ${renderTreeItem("", "Avg Direct Msgs / Observed Turn", current.avgDirectMessagesPerObservedTurnFormatted || "unknown")}
     ${renderRecentChatRuns(current) || ""}
   `;
 }
@@ -298,8 +304,8 @@ function renderRecentChatRuns(current) {
   const runs = current.historicalRuns || [];
   if (runs.length === 0) return "";
   return `
-    <div class="tree-subitems-header empty" style="margin-top:4px;">Previous Turns:</div>
-    ${runs.slice(0, 5).map(run => renderTreeItem(SVGS.time, `Turn at ${run.messageCount} msgs`, `${run.deltaTokensFormatted}`)).join("")}
+    <div class="tree-subitems-header empty" style="margin-top:4px;">Recent Observed Turns:</div>
+    ${runs.slice(0, 5).map(run => renderTreeItem("", `Turn ${run.chatIndex} • +${run.directMessages} msgs`, `${run.deltaTokensFormatted}`)).join("")}
   `;
 }
 
@@ -318,13 +324,17 @@ function renderWorkspace(snapshot) {
   if (!workspace) return `<div class="empty">No workspace available.</div>`;
   let html = `
     ${renderTreeItem(SVGS.files, "Current Workspace", workspace.displayName || workspace.name)}
-    ${renderTreeItem(SVGS.link, "Mapped Chats", `${workspace.mappedConversationCount}/${workspace.conversationCount || 0}`)}
-    ${renderTreeItem(SVGS.graph, "Brain Size", workspace.brainSizeFormatted || "0 B")}
+    ${renderTreeItem("", "Workspace Total Tokens", workspace.estimatedTokensFormatted || "0")}
+    ${workspace.currentSessionShareFormatted ? renderTreeItem("", "Current Session Share", workspace.currentSessionShareFormatted) : ""}
+    ${workspace.currentSessionLastTurnTokensFormatted ? renderTreeItem("", "Current Session Last Turn", workspace.currentSessionLastTurnTokensFormatted) : ""}
+    ${workspace.currentSessionLastFiveTurnsTokensFormatted ? renderTreeItem("", "Current Session Last 5 Turns", workspace.currentSessionLastFiveTurnsTokensFormatted) : ""}
+    ${renderTreeItem("", "Mapped Chats", `${workspace.mappedConversationCount}/${workspace.conversationCount || 0}`)}
+    ${renderTreeItem("", "Brain Storage Size", workspace.brainSizeFormatted || "0 B")}
   `;
   if (workspace.conversations && workspace.conversations.length > 0) {
-    html += `<div class="tree-subitems-header empty" style="margin-top:4px;">Workspace Chats:</div>`;
+    html += `<div class="tree-subitems-header empty" style="margin-top:4px;">Top Sessions By Total Tokens:</div>`;
     workspace.conversations.slice(0, 5).forEach(c => {
-      html += renderTreeItem(SVGS.time, c.title || "Untitled", `${c.estimatedTotalTokensFormatted}`);
+      html += renderTreeItem("", c.title || "Untitled", `${c.estimatedTotalTokensFormatted}`);
     });
   }
   return html;
