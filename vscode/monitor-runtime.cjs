@@ -6,15 +6,20 @@ const initSqlJs = require("sql.js/dist/sql-wasm.js");
 
 const ACTIVE_WINDOW_MS = 90_000;
 const LIVE_FEED_LIMIT = 5;
+const QUIET_TURN_FINALIZE_MS = 30000;
 const UNMAPPED_WORKSPACE_ID = "__unmapped__";
 const UNMAPPED_WORKSPACE_URI = "__unmapped__";
-const UUID_REGEX = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/ig;
+const UUID_REGEX =
+  /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi;
 const BASE64_REGEX = /(?:[A-Za-z0-9+/]{24,}={0,2})/g;
-const TITLE_REGEX = /([A-Z][A-Za-z0-9&/()'.,:_-]*(?: [A-Za-z0-9&/()'.,:_-]+){1,12})/;
+const TITLE_REGEX =
+  /([A-Z][A-Za-z0-9&/()'.,:_-]*(?: [A-Za-z0-9&/()'.,:_-]+){1,12})/;
 const WINDOWS_DRIVE_REGEX = /^([a-zA-Z]):[\\/]/;
-const FILE_URI_REGEX = /file:\/\/(?:\/(?:[a-zA-Z]:|[a-zA-Z]%3A)|wsl\.localhost\/)[^\s"'<>)\]}]+/gi;
+const FILE_URI_REGEX =
+  /file:\/\/(?:\/(?:[a-zA-Z]:|[a-zA-Z]%3A)|wsl\.localhost\/)[^\s"'<>)\]}]+/gi;
 const TIMESTAMP_REGEX = /^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3})/;
-const LOG_CONVERSATION_REGEX = /conversation(?:_id)?[\s:=\[]+([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i;
+const LOG_CONVERSATION_REGEX =
+  /conversation(?:_id)?[\s:=\[]+([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i;
 
 function getAntigravityDataDir() {
   return path.join(os.homedir(), ".gemini", "antigravity");
@@ -34,10 +39,20 @@ function getAnnotationsDir() {
 
 function getElectronUserDataDir() {
   if (process.platform === "win32") {
-    return path.join(process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming"), "Antigravity", "User");
+    return path.join(
+      process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming"),
+      "Antigravity",
+      "User",
+    );
   }
   if (process.platform === "darwin") {
-    return path.join(os.homedir(), "Library", "Application Support", "Antigravity", "User");
+    return path.join(
+      os.homedir(),
+      "Library",
+      "Application Support",
+      "Antigravity",
+      "User",
+    );
   }
   return path.join(os.homedir(), ".config", "Antigravity", "User");
 }
@@ -56,10 +71,20 @@ function getWorkspaceStorageDir() {
 
 function getLogDir() {
   if (process.platform === "win32") {
-    return path.join(process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming"), "Antigravity", "logs");
+    return path.join(
+      process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming"),
+      "Antigravity",
+      "logs",
+    );
   }
   if (process.platform === "darwin") {
-    return path.join(os.homedir(), "Library", "Application Support", "Antigravity", "logs");
+    return path.join(
+      os.homedir(),
+      "Library",
+      "Application Support",
+      "Antigravity",
+      "logs",
+    );
   }
   return path.join(os.homedir(), ".config", "Antigravity", "logs");
 }
@@ -77,7 +102,10 @@ function collapseSlashes(input) {
 
 function normalizeWindowsPath(input) {
   const forward = String(input).replace(/\\/g, "/");
-  return forward.replace(WINDOWS_DRIVE_REGEX, (_, drive) => `${drive.toLowerCase()}:/`);
+  return forward.replace(
+    WINDOWS_DRIVE_REGEX,
+    (_, drive) => `${drive.toLowerCase()}:/`,
+  );
 }
 
 function normalizeFileUriLike(input) {
@@ -85,7 +113,10 @@ function normalizeFileUriLike(input) {
 
   if (/^file:\/\/wsl\.localhost\//i.test(cleaned)) {
     const suffix = cleaned.slice("file://".length);
-    const normalized = collapseSlashes(suffix).replace(/^wsl\.localhost/i, "wsl.localhost");
+    const normalized = collapseSlashes(suffix).replace(
+      /^wsl\.localhost/i,
+      "wsl.localhost",
+    );
     return `file://${normalized}`.replace(/\/$/, "");
   }
 
@@ -104,7 +135,10 @@ function toFileUri(input) {
   }
 
   const unixLike = collapseSlashes(normalizedPath);
-  return `file://${unixLike.startsWith("/") ? "" : "/"}${unixLike}`.replace(/\/$/, "");
+  return `file://${unixLike.startsWith("/") ? "" : "/"}${unixLike}`.replace(
+    /\/$/,
+    "",
+  );
 }
 
 function normalizeWorkspaceUri(input) {
@@ -147,7 +181,10 @@ function uriMatchesWorkspaceRoot(candidate, workspaceRoot) {
     return false;
   }
 
-  return normalizedCandidate === normalizedRoot || normalizedCandidate.startsWith(`${normalizedRoot}/`);
+  return (
+    normalizedCandidate === normalizedRoot ||
+    normalizedCandidate.startsWith(`${normalizedRoot}/`)
+  );
 }
 
 function findFileUrisInText(text) {
@@ -164,7 +201,10 @@ function findFileUrisInText(text) {
 function formatBytes(bytes) {
   if (!bytes) return "0 B";
   const units = ["B", "KB", "MB", "GB"];
-  const unitIndex = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
+  const unitIndex = Math.min(
+    Math.floor(Math.log(bytes) / Math.log(1024)),
+    units.length - 1,
+  );
   const value = bytes / Math.pow(1024, unitIndex);
   return `${value < 10 ? value.toFixed(1) : Math.round(value)} ${units[unitIndex]}`;
 }
@@ -204,13 +244,21 @@ function assessHealth(estimatedTokens, bloatLimit) {
   return { status: "HEALTHY", tone: "healthy" };
 }
 
-function explainWhyHeavy(estimatedPromptTokens, estimatedArtifactTokens, estimatedTotalTokens, bloatLimit) {
+function explainWhyHeavy(
+  estimatedPromptTokens,
+  estimatedArtifactTokens,
+  estimatedTotalTokens,
+  bloatLimit,
+) {
   if (estimatedTotalTokens === 0) {
     return "No estimated context recorded yet.";
   }
 
   const ratio = estimatedTotalTokens / bloatLimit;
-  const artifactShare = estimatedTotalTokens > 0 ? estimatedArtifactTokens / estimatedTotalTokens : 0;
+  const artifactShare =
+    estimatedTotalTokens > 0
+      ? estimatedArtifactTokens / estimatedTotalTokens
+      : 0;
 
   if (ratio >= 1 && artifactShare >= 0.35) {
     return "Estimated total is over the limit and artifact context is a material share of it.";
@@ -232,14 +280,24 @@ function estimateConversationMetrics(input) {
   const BRAIN_BYTES_PER_TOKEN = 4.0;
   const TOKENS_PER_RESOLVED_VERSION = 500;
 
-  const messageBasedPromptTokens = input.messageCount !== null && input.messageCount !== undefined
-    ? input.messageCount * AVG_TOKENS_PER_MESSAGE
-    : 0;
-  const pbBasedPromptTokens = Math.floor(input.pbFileBytes / input.bytesPerToken);
-  const estimatedPromptTokens = messageBasedPromptTokens > 0 ? messageBasedPromptTokens : pbBasedPromptTokens;
-  const artifactFromBrain = Math.floor(input.brainFolderBytes / BRAIN_BYTES_PER_TOKEN);
-  const artifactFromResolvedVersions = input.resolvedVersionCount * TOKENS_PER_RESOLVED_VERSION;
-  const estimatedArtifactTokens = artifactFromBrain + artifactFromResolvedVersions;
+  const messageBasedPromptTokens =
+    input.messageCount !== null && input.messageCount !== undefined
+      ? input.messageCount * AVG_TOKENS_PER_MESSAGE
+      : 0;
+  const pbBasedPromptTokens = Math.floor(
+    input.pbFileBytes / input.bytesPerToken,
+  );
+  const estimatedPromptTokens =
+    messageBasedPromptTokens > 0
+      ? messageBasedPromptTokens
+      : pbBasedPromptTokens;
+  const artifactFromBrain = Math.floor(
+    input.brainFolderBytes / BRAIN_BYTES_PER_TOKEN,
+  );
+  const artifactFromResolvedVersions =
+    input.resolvedVersionCount * TOKENS_PER_RESOLVED_VERSION;
+  const estimatedArtifactTokens =
+    artifactFromBrain + artifactFromResolvedVersions;
 
   return {
     estimatedPromptTokens,
@@ -280,8 +338,14 @@ function loadMonitorConfig(configPath) {
   }
 
   return {
-    bloatLimit: typeof parsed.bloatLimit === "number" ? parsed.bloatLimit : defaults.bloatLimit,
-    bytesPerToken: typeof parsed.bytesPerToken === "number" ? parsed.bytesPerToken : defaults.bytesPerToken,
+    bloatLimit:
+      typeof parsed.bloatLimit === "number"
+        ? parsed.bloatLimit
+        : defaults.bloatLimit,
+    bytesPerToken:
+      typeof parsed.bytesPerToken === "number"
+        ? parsed.bytesPerToken
+        : defaults.bytesPerToken,
   };
 }
 
@@ -304,7 +368,12 @@ function parseStorageJson() {
   const sidebarWorkspaces = [];
   const scratchWorkspaces = [];
   const profileAssociations = raw.profileAssociations;
-  if (profileAssociations && typeof profileAssociations === "object" && profileAssociations.workspaces && typeof profileAssociations.workspaces === "object") {
+  if (
+    profileAssociations &&
+    typeof profileAssociations === "object" &&
+    profileAssociations.workspaces &&
+    typeof profileAssociations.workspaces === "object"
+  ) {
     for (const uri of Object.keys(profileAssociations.workspaces)) {
       const normalizedUri = normalizeWorkspaceUri(uri);
       if (!normalizedUri) continue;
@@ -319,9 +388,10 @@ function parseStorageJson() {
 
   const unifiedState = raw.antigravityUnifiedStateSync;
   if (unifiedState && typeof unifiedState === "object") {
-    const sidebar = typeof unifiedState.sidebarWorkspaces === "string"
-      ? safeJsonParse(unifiedState.sidebarWorkspaces)
-      : unifiedState.sidebarWorkspaces;
+    const sidebar =
+      typeof unifiedState.sidebarWorkspaces === "string"
+        ? safeJsonParse(unifiedState.sidebarWorkspaces)
+        : unifiedState.sidebarWorkspaces;
     if (Array.isArray(sidebar)) {
       for (const entry of sidebar) {
         if (!entry || typeof entry !== "object" || !entry.uri) continue;
@@ -333,9 +403,10 @@ function parseStorageJson() {
       }
     }
 
-    const scratch = typeof unifiedState.scratchWorkspaces === "string"
-      ? safeJsonParse(unifiedState.scratchWorkspaces)
-      : unifiedState.scratchWorkspaces;
+    const scratch =
+      typeof unifiedState.scratchWorkspaces === "string"
+        ? safeJsonParse(unifiedState.scratchWorkspaces)
+        : unifiedState.scratchWorkspaces;
     if (Array.isArray(scratch)) {
       for (const entry of scratch) {
         if (!entry || typeof entry !== "object" || !entry.uri) continue;
@@ -378,12 +449,17 @@ function scanWorkspaceStorage() {
 }
 
 function readAnnotation(conversationId) {
-  const annotationPath = path.join(getAnnotationsDir(), `${conversationId}.pbtxt`);
+  const annotationPath = path.join(
+    getAnnotationsDir(),
+    `${conversationId}.pbtxt`,
+  );
   if (!fs.existsSync(annotationPath)) return null;
 
   try {
     const content = fs.readFileSync(annotationPath, "utf-8");
-    const nestedSeconds = content.match(/last_user_view_time\s*:\s*\{\s*seconds\s*:\s*(\d+)/);
+    const nestedSeconds = content.match(
+      /last_user_view_time\s*:\s*\{\s*seconds\s*:\s*(\d+)/,
+    );
     const flatValue = content.match(/last_user_view_time\s*:\s*(\d+)/);
     let lastUserViewTime = null;
     if (nestedSeconds) {
@@ -476,10 +552,10 @@ function countArtifacts(dirPath) {
       if (entry.isDirectory()) {
         count += countArtifacts(fullPath);
       } else if (
-        entry.isFile()
-        && !entry.name.endsWith(".metadata.json")
-        && !/\.resolved\.\d+$/i.test(entry.name)
-        && entry.name !== "overview.txt"
+        entry.isFile() &&
+        !entry.name.endsWith(".metadata.json") &&
+        !/\.resolved\.\d+$/i.test(entry.name) &&
+        entry.name !== "overview.txt"
       ) {
         count += 1;
       }
@@ -499,7 +575,10 @@ function extractWorkspaceUrisFromBrain(dirPath) {
         for (const uri of extractWorkspaceUrisFromBrain(fullPath)) {
           uris.add(uri);
         }
-      } else if (entry.isFile() && (entry.name.endsWith(".md") || entry.name.endsWith(".txt"))) {
+      } else if (
+        entry.isFile() &&
+        (entry.name.endsWith(".md") || entry.name.endsWith(".txt"))
+      ) {
         try {
           const content = fs.readFileSync(fullPath, "utf-8");
           for (const uri of findFileUrisInText(content)) {
@@ -536,7 +615,11 @@ function extractBrainTitle(dirPath) {
       }
       if (fileName.endsWith(".json")) {
         const parsed = JSON.parse(content);
-        if (parsed && typeof parsed.summary === "string" && parsed.summary.trim().length >= 6) {
+        if (
+          parsed &&
+          typeof parsed.summary === "string" &&
+          parsed.summary.trim().length >= 6
+        ) {
           return parsed.summary.trim();
         }
       }
@@ -577,9 +660,13 @@ function findLatestLogFile() {
   if (!fs.existsSync(logDir)) return null;
 
   try {
-    const dateDirs = fs.readdirSync(logDir, { withFileTypes: true })
+    const dateDirs = fs
+      .readdirSync(logDir, { withFileTypes: true })
       .filter((entry) => entry.isDirectory())
-      .map((entry) => ({ name: entry.name, fullPath: path.join(logDir, entry.name) }))
+      .map((entry) => ({
+        name: entry.name,
+        fullPath: path.join(logDir, entry.name),
+      }))
       .sort((left, right) => right.name.localeCompare(left.name));
 
     for (const dateDir of dateDirs) {
@@ -617,14 +704,28 @@ function parseLogLine(line) {
   const timestampMatch = line.match(TIMESTAMP_REGEX);
   const timestamp = timestampMatch ? timestampMatch[1] : null;
 
-  const messageMatch = line.match(/planner_generator\.go:\d+\]\s*Requesting planner with (\d+) chat messages/i);
+  const messageMatch = line.match(
+    /planner_generator\.go:\d+\]\s*Requesting planner with (\d+) chat messages/i,
+  );
   if (messageMatch) {
-    return { type: "message_count", value: parseInt(messageMatch[1], 10), timestamp, raw: line };
+    return {
+      type: "message_count",
+      value: parseInt(messageMatch[1], 10),
+      timestamp,
+      raw: line,
+    };
   }
 
-  const conversationMatch = line.match(/interceptor\.go:\d+\].*?conversation\s+([0-9a-f-]{36})/i) || line.match(LOG_CONVERSATION_REGEX);
+  const conversationMatch =
+    line.match(/interceptor\.go:\d+\].*?conversation\s+([0-9a-f-]{36})/i) ||
+    line.match(LOG_CONVERSATION_REGEX);
   if (conversationMatch) {
-    return { type: "conversation_id", value: conversationMatch[1], timestamp, raw: line };
+    return {
+      type: "conversation_id",
+      value: conversationMatch[1],
+      timestamp,
+      raw: line,
+    };
   }
 
   return null;
@@ -712,9 +813,11 @@ function tryParseJson(raw) {
 
 function isLikelyBase64(raw) {
   const trimmed = String(raw || "").trim();
-  return trimmed.length >= 16
-    && trimmed.length % 4 === 0
-    && /^[A-Za-z0-9+/=\r\n]+$/.test(trimmed);
+  return (
+    trimmed.length >= 16 &&
+    trimmed.length % 4 === 0 &&
+    /^[A-Za-z0-9+/=\r\n]+$/.test(trimmed)
+  );
 }
 
 function toPrintableText(input) {
@@ -722,7 +825,9 @@ function toPrintableText(input) {
 }
 
 function decodeBase64Printable(candidate) {
-  return toPrintableText(Buffer.from(candidate, "base64").toString("utf-8")).trim();
+  return toPrintableText(
+    Buffer.from(candidate, "base64").toString("utf-8"),
+  ).trim();
 }
 
 function scoreDecodedText(text) {
@@ -783,7 +888,12 @@ function decodeNestedPayloads(segment) {
       }
 
       if (!printable || printable.length < 8) continue;
-      if (!/(file:\/\/\/|https?:\/\/|[A-Za-z]{4,} [A-Za-z]{4,}|\{\".+)/.test(printable)) continue;
+      if (
+        !/(file:\/\/\/|https?:\/\/|[A-Za-z]{4,} [A-Za-z]{4,}|\{\".+)/.test(
+          printable,
+        )
+      )
+        continue;
       if (seen.has(printable)) continue;
       seen.add(printable);
       decoded.push(printable);
@@ -819,7 +929,9 @@ function extractTitle(segment, nestedPayloads, conversationId) {
 }
 
 function extractMessageCount(text) {
-  const directMatch = String(text || "").match(/(?:messageCount|chat messages?)["\s:=-]+(\d{1,5})/i);
+  const directMatch = String(text || "").match(
+    /(?:messageCount|chat messages?)["\s:=-]+(\d{1,5})/i,
+  );
   return directMatch ? parseInt(directMatch[1], 10) : undefined;
 }
 
@@ -860,12 +972,16 @@ function extractTrajectoriesFromJson(value) {
     if (!entry || typeof entry !== "object") continue;
     const conversationId = String(entry.conversationId || entry.id || "");
     if (!conversationId) continue;
-    const workspaceUri = normalizeWorkspaceUri(typeof entry.workspaceUri === "string" ? entry.workspaceUri : undefined);
+    const workspaceUri = normalizeWorkspaceUri(
+      typeof entry.workspaceUri === "string" ? entry.workspaceUri : undefined,
+    );
     results.push({
       conversationId,
       title: typeof entry.title === "string" ? entry.title : undefined,
-      messageCount: typeof entry.messageCount === "number" ? entry.messageCount : undefined,
-      lastActivity: typeof entry.lastActivity === "string" ? entry.lastActivity : undefined,
+      messageCount:
+        typeof entry.messageCount === "number" ? entry.messageCount : undefined,
+      lastActivity:
+        typeof entry.lastActivity === "string" ? entry.lastActivity : undefined,
       workspaceUri: workspaceUri || undefined,
       workspaceUris: workspaceUri ? [workspaceUri] : [],
     });
@@ -881,18 +997,24 @@ function extractTrajectorySummariesFromEncodedText(text) {
     const current = matches[index];
     const conversationId = current[0];
     const currentIndex = current.index || 0;
-    const nextIndex = matches[index + 1] ? matches[index + 1].index : text.length;
+    const nextIndex = matches[index + 1]
+      ? matches[index + 1].index
+      : text.length;
     const previousBoundary = matches[index - 1]
-      ? ((matches[index - 1].index || 0) + matches[index - 1][0].length)
+      ? (matches[index - 1].index || 0) + matches[index - 1][0].length
       : 0;
 
     const start = Math.max(previousBoundary, currentIndex - 160);
     const end = Math.min(nextIndex || text.length, currentIndex + 4_000);
     const segment = text.slice(start, end);
     const nestedPayloads = decodeNestedPayloads(segment);
-    const combinedText = [toPrintableText(segment), ...nestedPayloads].join("\n");
+    const combinedText = [toPrintableText(segment), ...nestedPayloads].join(
+      "\n",
+    );
     const workspaceUris = findFileUrisInText(combinedText);
-    const usefulWorkspaceUris = workspaceUris.filter((uri) => !uri.includes("/.gemini/antigravity/brain/"));
+    const usefulWorkspaceUris = workspaceUris.filter(
+      (uri) => !uri.includes("/.gemini/antigravity/brain/"),
+    );
     const workspaceUri = usefulWorkspaceUris[0] || workspaceUris[0];
 
     results.push({
@@ -900,7 +1022,8 @@ function extractTrajectorySummariesFromEncodedText(text) {
       title: extractTitle(segment, nestedPayloads, conversationId),
       messageCount: extractMessageCount(combinedText),
       workspaceUri,
-      workspaceUris: usefulWorkspaceUris.length > 0 ? usefulWorkspaceUris : workspaceUris,
+      workspaceUris:
+        usefulWorkspaceUris.length > 0 ? usefulWorkspaceUris : workspaceUris,
     });
   }
 
@@ -936,11 +1059,12 @@ function extractChatSessions(value) {
       sessionId,
       workspaceUri: workspaceUri || undefined,
       title: typeof entry.title === "string" ? entry.title : undefined,
-      lastModified: typeof entry.lastModified === "string"
-        ? entry.lastModified
-        : typeof entry.updatedAt === "string"
-          ? entry.updatedAt
-          : undefined,
+      lastModified:
+        typeof entry.lastModified === "string"
+          ? entry.lastModified
+          : typeof entry.updatedAt === "string"
+            ? entry.updatedAt
+            : undefined,
     });
   }
   return sessions;
@@ -994,7 +1118,13 @@ function buildWorkspaceRegistry(storageWorkspaces, workspaceStorageEntries) {
   return registry;
 }
 
-function findWorkspaceMatch(candidateUris, registry, sourcePrefix, exactConfidence, prefixConfidence) {
+function findWorkspaceMatch(
+  candidateUris,
+  registry,
+  sourcePrefix,
+  exactConfidence,
+  prefixConfidence,
+) {
   for (const candidate of candidateUris || []) {
     const normalizedCandidate = normalizeWorkspaceUri(candidate);
     if (!normalizedCandidate) continue;
@@ -1012,7 +1142,9 @@ function findWorkspaceMatch(candidateUris, registry, sourcePrefix, exactConfiden
 
     for (const workspace of registry.values()) {
       if (workspace.id === UNMAPPED_WORKSPACE_ID) continue;
-      if (uriMatchesWorkspaceRoot(normalizedCandidate, workspace.normalizedUri)) {
+      if (
+        uriMatchesWorkspaceRoot(normalizedCandidate, workspace.normalizedUri)
+      ) {
         return {
           workspaceId: workspace.id,
           workspaceUri: workspace.uri,
@@ -1050,14 +1182,24 @@ function findWorkspaceByTitleHint(titleCandidates, registry) {
     workspaceUri: workspace.uri,
     mappingSource: "title_hint",
     mappingConfidence: 0.55,
-    mappingNote: "Matched the workspace name from conversation or brain-title text because no URI signal was available.",
+    mappingNote:
+      "Matched the workspace name from conversation or brain-title text because no URI signal was available.",
   };
 }
 
 function buildUnmappedReason(trajectory, brain) {
-  const stateUriCount = trajectory && Array.isArray(trajectory.workspaceUris) ? trajectory.workspaceUris.length : 0;
-  const brainUriCount = brain && Array.isArray(brain.workspaceUris) ? brain.workspaceUris.length : 0;
-  const titleHints = [trajectory ? trajectory.title : null, brain ? brain.title : null].filter((value) => Boolean(String(value || "").trim()));
+  const stateUriCount =
+    trajectory && Array.isArray(trajectory.workspaceUris)
+      ? trajectory.workspaceUris.length
+      : 0;
+  const brainUriCount =
+    brain && Array.isArray(brain.workspaceUris)
+      ? brain.workspaceUris.length
+      : 0;
+  const titleHints = [
+    trajectory ? trajectory.title : null,
+    brain ? brain.title : null,
+  ].filter((value) => Boolean(String(value || "").trim()));
 
   if (stateUriCount === 0 && brainUriCount === 0 && titleHints.length === 0) {
     return "No workspace URI, brain URI, or usable title hint was found.";
@@ -1065,13 +1207,19 @@ function buildUnmappedReason(trajectory, brain) {
 
   const parts = [];
   if (stateUriCount > 0) {
-    parts.push(`state.vscdb exposed ${stateUriCount} workspace URI${stateUriCount > 1 ? "s" : ""} but none matched a known workspace`);
+    parts.push(
+      `state.vscdb exposed ${stateUriCount} workspace URI${stateUriCount > 1 ? "s" : ""} but none matched a known workspace`,
+    );
   }
   if (brainUriCount > 0) {
-    parts.push(`brain artifacts exposed ${brainUriCount} workspace URI${brainUriCount > 1 ? "s" : ""} but none matched a known workspace`);
+    parts.push(
+      `brain artifacts exposed ${brainUriCount} workspace URI${brainUriCount > 1 ? "s" : ""} but none matched a known workspace`,
+    );
   }
   if (titleHints.length > 0) {
-    parts.push(`title hints (${titleHints.map((title) => `"${title}"`).join(", ")}) did not uniquely identify a workspace`);
+    parts.push(
+      `title hints (${titleHints.map((title) => `"${title}"`).join(", ")}) did not uniquely identify a workspace`,
+    );
   }
   return `${parts.join("; ")}.`;
 }
@@ -1090,13 +1238,22 @@ function chooseLastActive(conversationEntry, logSnapshot, liveState) {
   }
 
   if (conversationEntry.annotationTimestamp) {
-    candidates.push({ value: new Date(conversationEntry.annotationTimestamp).toISOString(), source: "annotation" });
+    candidates.push({
+      value: new Date(conversationEntry.annotationTimestamp).toISOString(),
+      source: "annotation",
+    });
   }
   if (conversationEntry.lastModified) {
-    candidates.push({ value: conversationEntry.lastModified.toISOString(), source: "filesystem" });
+    candidates.push({
+      value: conversationEntry.lastModified.toISOString(),
+      source: "filesystem",
+    });
   }
 
-  candidates.sort((left, right) => new Date(right.value).getTime() - new Date(left.value).getTime());
+  candidates.sort(
+    (left, right) =>
+      new Date(right.value).getTime() - new Date(left.value).getTime(),
+  );
   return candidates[0] || { value: null, source: null };
 }
 
@@ -1118,7 +1275,8 @@ function disambiguateWorkspaceDisplayNames(workspaces) {
 function buildWorkspaceUriHint(uri, workspaceName) {
   const normalized = normalizeWorkspaceUri(uri);
   if (!normalized || normalized === "__unmapped__") return null;
-  if (normalized.includes("/.gemini/antigravity/playground/")) return "playground";
+  if (normalized.includes("/.gemini/antigravity/playground/"))
+    return "playground";
   const withoutScheme = normalized.replace(/^file:\/\/\/?/i, "");
   const parts = withoutScheme.split("/").filter(Boolean);
   if (parts.length === 0) return null;
@@ -1140,14 +1298,24 @@ function indexById(items) {
 
 function chooseCurrentConversation(conversations, liveState, logSnapshot) {
   const conversationIndex = indexById(conversations);
-  const mostRecent = [...conversations].sort((left, right) => {
-    const leftDate = new Date(left.lastActiveAt || left.lastModified || 0).getTime();
-    const rightDate = new Date(right.lastActiveAt || right.lastModified || 0).getTime();
-    return rightDate - leftDate;
-  })[0] || null;
+  const mostRecent =
+    [...conversations].sort((left, right) => {
+      const leftDate = new Date(
+        left.lastActiveAt || left.lastModified || 0,
+      ).getTime();
+      const rightDate = new Date(
+        right.lastActiveAt || right.lastModified || 0,
+      ).getTime();
+      return rightDate - leftDate;
+    })[0] || null;
 
-  const freshLogId = logSnapshot && logSnapshot.activeConversationId && logSnapshot.activeAt
-    && (Date.now() - new Date(String(logSnapshot.activeAt).replace(" ", "T")).getTime() <= ACTIVE_WINDOW_MS)
+  const freshLogId =
+    logSnapshot &&
+    logSnapshot.activeConversationId &&
+    logSnapshot.activeAt &&
+    Date.now() -
+      new Date(String(logSnapshot.activeAt).replace(" ", "T")).getTime() <=
+      ACTIVE_WINDOW_MS
       ? logSnapshot.activeConversationId
       : null;
   const activeLogId = liveState.activeLogConversationId || freshLogId;
@@ -1161,8 +1329,13 @@ function chooseCurrentConversation(conversations, liveState, logSnapshot) {
   }
 
   const recentPbCandidate = [...liveState.recentPbActivity.entries()]
-    .filter(([, value]) => Date.now() - new Date(value).getTime() <= ACTIVE_WINDOW_MS)
-    .sort((left, right) => new Date(right[1]).getTime() - new Date(left[1]).getTime())[0];
+    .filter(
+      ([, value]) => Date.now() - new Date(value).getTime() <= ACTIVE_WINDOW_MS,
+    )
+    .sort(
+      (left, right) =>
+        new Date(right[1]).getTime() - new Date(left[1]).getTime(),
+    )[0];
   if (recentPbCandidate && conversationIndex.has(recentPbCandidate[0])) {
     return {
       conversation: conversationIndex.get(recentPbCandidate[0]),
@@ -1194,7 +1367,8 @@ function chooseCurrentConversation(conversations, liveState, logSnapshot) {
     return {
       conversation: mostRecent,
       resolutionState: "recent_fallback",
-      resolutionNote: "No live active conversation could be confirmed, so the most recent session is shown instead.",
+      resolutionNote:
+        "No live active conversation could be confirmed, so the most recent session is shown instead.",
     };
   }
 
@@ -1207,28 +1381,52 @@ function chooseCurrentConversation(conversations, liveState, logSnapshot) {
 
 function sortWorkspacesForDisplay(workspaces, currentWorkspaceId) {
   return [...workspaces].sort((left, right) => {
-    if (currentWorkspaceId && left.id === currentWorkspaceId && right.id !== currentWorkspaceId) return -1;
-    if (currentWorkspaceId && right.id === currentWorkspaceId && left.id !== currentWorkspaceId) return 1;
+    if (
+      currentWorkspaceId &&
+      left.id === currentWorkspaceId &&
+      right.id !== currentWorkspaceId
+    )
+      return -1;
+    if (
+      currentWorkspaceId &&
+      right.id === currentWorkspaceId &&
+      left.id !== currentWorkspaceId
+    )
+      return 1;
     return right.estimatedTokens - left.estimatedTokens;
   });
 }
 
-function chooseWorkspaceDetail(workspaces, preferredWorkspacePath, currentConversation) {
+function chooseWorkspaceDetail(
+  workspaces,
+  preferredWorkspacePath,
+  currentConversation,
+) {
   const preferredUri = normalizeWorkspaceUri(preferredWorkspacePath);
   if (preferredUri) {
     const directMatch = workspaces.find((workspace) => {
       const normalizedWorkspaceUri = normalizeWorkspaceUri(workspace.uri);
-      return normalizedWorkspaceUri && (preferredUri === normalizedWorkspaceUri || preferredUri.startsWith(`${normalizedWorkspaceUri}/`));
+      return (
+        normalizedWorkspaceUri &&
+        (preferredUri === normalizedWorkspaceUri ||
+          preferredUri.startsWith(`${normalizedWorkspaceUri}/`))
+      );
     });
     if (directMatch) return directMatch;
   }
 
   if (currentConversation && currentConversation.workspaceId) {
-    const currentMatch = workspaces.find((workspace) => workspace.id === currentConversation.workspaceId);
+    const currentMatch = workspaces.find(
+      (workspace) => workspace.id === currentConversation.workspaceId,
+    );
     if (currentMatch) return currentMatch;
   }
 
-  return workspaces.find((workspace) => workspace.id !== UNMAPPED_WORKSPACE_ID) || workspaces[0] || null;
+  return (
+    workspaces.find((workspace) => workspace.id !== UNMAPPED_WORKSPACE_ID) ||
+    workspaces[0] ||
+    null
+  );
 }
 
 class AgKernelMonitorRuntime {
@@ -1268,7 +1466,8 @@ class AgKernelMonitorRuntime {
     this.onError = options.onError || null;
     this.preferredWorkspacePath = options.preferredWorkspacePath || null;
     this.configPath = options.configPath || null;
-    this.fallbackRefreshMs = Math.max(0, Number(options.autoRefreshSeconds || 0)) * 1000;
+    this.fallbackRefreshMs =
+      Math.max(0, Number(options.autoRefreshSeconds || 0)) * 1000;
 
     await this.refresh();
 
@@ -1330,34 +1529,29 @@ class AgKernelMonitorRuntime {
     try {
       const pbChanges = this.pollConversationFileSizes();
       const logChanges = this.pollLogFile();
-      if (pbChanges.length === 0 && !logChanges.changed) {
+      const now = new Date().toISOString();
+      const quietFinalized = finalizeQuietTurns(this.liveState, now);
+      if (pbChanges.length === 0 && !logChanges.changed && !quietFinalized) {
         return;
       }
 
-      const now = new Date().toISOString();
       for (const change of pbChanges) {
         this.liveState.recentPbActivity.set(change.conversationId, now);
       }
       if (logChanges.activeConversationId) {
-        this.liveState.activeLogConversationId = logChanges.activeConversationId;
+        this.liveState.activeLogConversationId =
+          logChanges.activeConversationId;
       }
       for (const update of logChanges.messageUpdates) {
-        this.liveState.logMessageCounts.set(update.conversationId, update.messageCount);
+        this.liveState.logMessageCounts.set(
+          update.conversationId,
+          update.messageCount,
+        );
       }
 
       const previousSnapshot = this.lastSnapshot;
       const freshSnapshot = await this.collectSnapshot();
       const nextIndex = indexById(freshSnapshot.allConversations || []);
-
-      for (const change of pbChanges) {
-        const conversation = nextIndex.get(change.conversationId);
-        if (!conversation) continue;
-        const previousConversation = previousSnapshot ? indexById(previousSnapshot.allConversations || []).get(change.conversationId) : null;
-        const deltaTokens = previousConversation
-          ? conversation.estimatedTotalTokens - previousConversation.estimatedTotalTokens
-          : Math.round(change.deltaBytes / 3.5);
-        recordChatProgress(this.liveState, change.conversationId, conversation.estimatedTotalTokens, deltaTokens, change.timestamp);
-      }
 
       for (const update of logChanges.messageUpdates) {
         const conversation = nextIndex.get(update.conversationId);
@@ -1371,7 +1565,33 @@ class AgKernelMonitorRuntime {
         );
       }
 
-      const events = buildLiveEvents(previousSnapshot, freshSnapshot, pbChanges, logChanges);
+      for (const change of pbChanges) {
+        const conversation = nextIndex.get(change.conversationId);
+        if (!conversation) continue;
+        const previousConversation = previousSnapshot
+          ? indexById(previousSnapshot.allConversations || []).get(
+              change.conversationId,
+            )
+          : null;
+        const deltaTokens = previousConversation
+          ? conversation.estimatedTotalTokens -
+            previousConversation.estimatedTotalTokens
+          : Math.round(change.deltaBytes / 3.5);
+        recordChatProgress(
+          this.liveState,
+          change.conversationId,
+          conversation.estimatedTotalTokens,
+          deltaTokens,
+          change.timestamp,
+        );
+      }
+
+      const events = buildLiveEvents(
+        previousSnapshot,
+        freshSnapshot,
+        pbChanges,
+        logChanges,
+      );
       if (events.length > 0) {
         for (const event of events) {
           this.liveState.latestDeltas.set(event.conversationId, {
@@ -1379,7 +1599,10 @@ class AgKernelMonitorRuntime {
             timestamp: event.timestamp,
           });
         }
-        this.liveState.feed = [...events, ...this.liveState.feed].slice(0, LIVE_FEED_LIMIT);
+        this.liveState.feed = [...events, ...this.liveState.feed].slice(
+          0,
+          LIVE_FEED_LIMIT,
+        );
       }
 
       const decorated = this.decorateSnapshot(freshSnapshot);
@@ -1402,42 +1625,87 @@ class AgKernelMonitorRuntime {
       const latestDelta = latestDeltas.get(conversation.id);
       return {
         ...conversation,
-        deltaEstimatedTokens: latestDelta ? latestDelta.deltaTokens : conversation.deltaEstimatedTokens || 0,
+        deltaEstimatedTokens: latestDelta
+          ? latestDelta.deltaTokens
+          : conversation.deltaEstimatedTokens || 0,
         deltaEstimatedTokensFormatted: `${(latestDelta ? latestDelta.deltaTokens : conversation.deltaEstimatedTokens || 0) >= 0 ? "+" : "-"}${formatTokens(Math.abs(latestDelta ? latestDelta.deltaTokens : conversation.deltaEstimatedTokens || 0))}`,
       };
     });
 
     const conversationIndex = indexById(allConversations);
     const currentConversationState = snapshot.currentConversation.conversation
-      ? this.liveState.chatRuns.get(snapshot.currentConversation.conversation.id) || null
+      ? this.liveState.chatRuns.get(
+          snapshot.currentConversation.conversation.id,
+        ) || null
       : null;
     const currentConversationView = snapshot.currentConversation.conversation
-      ? conversationIndex.get(snapshot.currentConversation.conversation.id) || snapshot.currentConversation.conversation
+      ? conversationIndex.get(snapshot.currentConversation.conversation.id) ||
+        snapshot.currentConversation.conversation
       : null;
-    const observedTurnCount = currentConversationState ? currentConversationState.observedCompletedTurns : 0;
-    const avgTokensPerObservedTurn = observedTurnCount > 0
-      ? Math.round(currentConversationState.observedTokensAdded / observedTurnCount)
-      : null;
-    const avgDirectMessagesPerObservedTurn = observedTurnCount > 0
-      ? currentConversationState.observedDirectMessages / observedTurnCount
-      : null;
-    const currentTurnDirectMessages = currentConversationView && currentConversationState
-      && currentConversationView.messageCount !== null
-      && currentConversationState.currentRunStartMessageCount !== null
-      ? Math.max(0, currentConversationView.messageCount - currentConversationState.currentRunStartMessageCount)
-      : null;
-    const lastObservedTurn = currentConversationState && currentConversationState.recentRuns.length > 0
-      ? currentConversationState.recentRuns[0]
-      : null;
+    const observedTurnCount = currentConversationState
+      ? currentConversationState.observedCompletedTurns
+      : 0;
+    const avgTokensPerObservedTurn =
+      observedTurnCount > 0
+        ? Math.round(
+            currentConversationState.observedTokensAdded / observedTurnCount,
+          )
+        : null;
+    const avgDirectMessagesPerObservedTurn =
+      currentConversationState &&
+      currentConversationState.observedTurnsWithDirectMessages > 0
+        ? currentConversationState.observedDirectMessages /
+          currentConversationState.observedTurnsWithDirectMessages
+        : null;
+    const hasActiveObservedTurn =
+      currentConversationState &&
+      currentConversationState.currentRunDeltaTokens > 0;
+    const currentTurnDirectMessages =
+      currentConversationView &&
+      currentConversationState &&
+      hasActiveObservedTurn &&
+      currentConversationView.messageCount !== null &&
+      currentConversationState.currentRunStartMessageCount !== null
+        ? Math.max(
+            0,
+            currentConversationView.messageCount -
+              currentConversationState.currentRunStartMessageCount,
+          )
+        : null;
+    const lastObservedTurn =
+      currentConversationState && currentConversationState.recentRuns.length > 0
+        ? currentConversationState.recentRuns[0]
+        : null;
     const lastFiveTurnsTokens = currentConversationState
-      ? currentConversationState.recentRuns.reduce((sum, run) => sum + run.deltaTokens, 0)
+      ? currentConversationState.recentRuns.reduce(
+          (sum, run) => sum + run.deltaTokens,
+          0,
+        )
       : 0;
     const currentConversation = snapshot.currentConversation.conversation
       ? {
           ...currentConversationView,
           resolutionState: snapshot.currentConversation.resolutionState,
           resolutionNote: snapshot.currentConversation.resolutionNote,
-          latestDelta: latestDeltas.get(snapshot.currentConversation.conversation.id)?.deltaTokens || 0,
+          latestDelta:
+            latestDeltas.get(snapshot.currentConversation.conversation.id)
+              ?.deltaTokens || 0,
+          deltaEstimatedTokens: currentConversationState
+            ? currentConversationState.currentRunDeltaTokens
+            : currentConversationView.deltaEstimatedTokens || 0,
+          deltaEstimatedTokensFormatted: `${
+            (currentConversationState
+              ? currentConversationState.currentRunDeltaTokens
+              : currentConversationView.deltaEstimatedTokens || 0) >= 0
+              ? "+"
+              : "-"
+          }${formatTokens(
+            Math.abs(
+              currentConversationState
+                ? currentConversationState.currentRunDeltaTokens
+                : currentConversationView.deltaEstimatedTokens || 0,
+            ),
+          )}`,
           currentChatRun: currentConversationState
             ? {
                 chatIndex: currentConversationState.nextChatIndex,
@@ -1451,11 +1719,23 @@ class AgKernelMonitorRuntime {
           observedTurnCount,
           currentTurnDirectMessages,
           avgTokensPerObservedTurn,
-          avgTokensPerObservedTurnFormatted: avgTokensPerObservedTurn !== null ? formatTokens(avgTokensPerObservedTurn) : "unknown",
+          avgTokensPerObservedTurnFormatted:
+            avgTokensPerObservedTurn !== null
+              ? formatTokens(avgTokensPerObservedTurn)
+              : "unknown",
           avgDirectMessagesPerObservedTurn,
-          avgDirectMessagesPerObservedTurnFormatted: avgDirectMessagesPerObservedTurn !== null ? avgDirectMessagesPerObservedTurn.toFixed(avgDirectMessagesPerObservedTurn >= 10 ? 0 : 1) : "unknown",
-          lastObservedTurnTokens: lastObservedTurn ? lastObservedTurn.deltaTokens : null,
-          lastObservedTurnTokensFormatted: lastObservedTurn ? `${lastObservedTurn.deltaTokens >= 0 ? "+" : "-"}${formatTokens(Math.abs(lastObservedTurn.deltaTokens))}` : "none",
+          avgDirectMessagesPerObservedTurnFormatted:
+            avgDirectMessagesPerObservedTurn !== null
+              ? avgDirectMessagesPerObservedTurn.toFixed(
+                  avgDirectMessagesPerObservedTurn >= 10 ? 0 : 1,
+                )
+              : "unknown",
+          lastObservedTurnTokens: lastObservedTurn
+            ? lastObservedTurn.deltaTokens
+            : null,
+          lastObservedTurnTokensFormatted: lastObservedTurn
+            ? `${lastObservedTurn.deltaTokens >= 0 ? "+" : "-"}${formatTokens(Math.abs(lastObservedTurn.deltaTokens))}`
+            : "none",
           lastFiveTurnsTokens,
           lastFiveTurnsTokensFormatted: `${lastFiveTurnsTokens >= 0 ? "+" : "-"}${formatTokens(Math.abs(lastFiveTurnsTokens))}`,
         }
@@ -1464,16 +1744,29 @@ class AgKernelMonitorRuntime {
     const workspaceDetail = snapshot.workspaceDetail
       ? {
           ...snapshot.workspaceDetail,
-          conversations: snapshot.workspaceDetail.conversations.map((conversation) => conversationIndex.get(conversation.id) || conversation),
-          currentSessionShareFormatted: currentConversation && snapshot.workspaceDetail.estimatedTokens > 0 && snapshot.workspaceDetail.id === currentConversation.workspaceId
-            ? formatRatio(currentConversation.estimatedTotalTokens / snapshot.workspaceDetail.estimatedTokens)
-            : null,
-          currentSessionLastTurnTokensFormatted: currentConversation && snapshot.workspaceDetail.id === currentConversation.workspaceId
-            ? currentConversation.lastObservedTurnTokensFormatted
-            : null,
-          currentSessionLastFiveTurnsTokensFormatted: currentConversation && snapshot.workspaceDetail.id === currentConversation.workspaceId
-            ? currentConversation.lastFiveTurnsTokensFormatted
-            : null,
+          conversations: snapshot.workspaceDetail.conversations.map(
+            (conversation) =>
+              conversationIndex.get(conversation.id) || conversation,
+          ),
+          currentSessionShareFormatted:
+            currentConversation &&
+            snapshot.workspaceDetail.estimatedTokens > 0 &&
+            snapshot.workspaceDetail.id === currentConversation.workspaceId
+              ? formatRatio(
+                  currentConversation.estimatedTotalTokens /
+                    snapshot.workspaceDetail.estimatedTokens,
+                )
+              : null,
+          currentSessionLastTurnTokensFormatted:
+            currentConversation &&
+            snapshot.workspaceDetail.id === currentConversation.workspaceId
+              ? currentConversation.lastObservedTurnTokensFormatted
+              : null,
+          currentSessionLastFiveTurnsTokensFormatted:
+            currentConversation &&
+            snapshot.workspaceDetail.id === currentConversation.workspaceId
+              ? currentConversation.lastFiveTurnsTokensFormatted
+              : null,
         }
       : null;
 
@@ -1488,9 +1781,20 @@ class AgKernelMonitorRuntime {
       workspaceDetail,
       cleanupSummary: {
         ...snapshot.cleanupSummary,
-        largestSessions: snapshot.cleanupSummary.largestSessions.map((conversation) => conversationIndex.get(conversation.id) || conversation),
-        unmappedConversations: snapshot.cleanupSummary.unmappedConversations.map((conversation) => conversationIndex.get(conversation.id) || conversation),
-        recommendedCleanupTargets: snapshot.cleanupSummary.recommendedCleanupTargets.map((conversation) => conversationIndex.get(conversation.id) || conversation),
+        largestSessions: snapshot.cleanupSummary.largestSessions.map(
+          (conversation) =>
+            conversationIndex.get(conversation.id) || conversation,
+        ),
+        unmappedConversations:
+          snapshot.cleanupSummary.unmappedConversations.map(
+            (conversation) =>
+              conversationIndex.get(conversation.id) || conversation,
+          ),
+        recommendedCleanupTargets:
+          snapshot.cleanupSummary.recommendedCleanupTargets.map(
+            (conversation) =>
+              conversationIndex.get(conversation.id) || conversation,
+          ),
       },
     };
   }
@@ -1576,7 +1880,11 @@ class AgKernelMonitorRuntime {
 
     let newContent;
     try {
-      newContent = readAppendedText(latestPath, this.liveState.logOffset, stats.size);
+      newContent = readAppendedText(
+        latestPath,
+        this.liveState.logOffset,
+        stats.size,
+      );
     } catch {
       return result;
     }
@@ -1595,11 +1903,44 @@ class AgKernelMonitorRuntime {
         continue;
       }
 
-      if (parsed.type === "message_count" && this.liveState.logCurrentConversationId) {
+      if (parsed.type === "message_count") {
+        const timestampIso = parsed.timestamp
+          ? toIsoString(parsed.timestamp)
+          : new Date().toISOString();
+        const inferredConversationId = inferLikelyConversationId(
+          this.liveState,
+          timestampIso,
+        );
+
+        let targetId = this.liveState.logCurrentConversationId;
+
+        // If the log's sticky ID points to a conversation that hasn't grown in 10s,
+        // but inference detects a new active conversation, proactively override the sticky ID.
+        if (
+          targetId &&
+          inferredConversationId &&
+          targetId !== inferredConversationId
+        ) {
+          const stickySeen = this.liveState.recentPbActivity.get(targetId);
+          if (
+            !stickySeen ||
+            new Date().getTime() - new Date(stickySeen).getTime() > 10000
+          ) {
+            targetId = inferredConversationId;
+          }
+        }
+
+        targetId = targetId || inferredConversationId;
+
+        if (!targetId) {
+          continue;
+        }
+        this.liveState.logCurrentConversationId = targetId;
+        result.activeConversationId = targetId;
         result.messageUpdates.push({
-          conversationId: this.liveState.logCurrentConversationId,
+          conversationId: targetId,
           messageCount: parsed.value,
-          timestamp: parsed.timestamp ? toIsoString(parsed.timestamp) : new Date().toISOString(),
+          timestamp: timestampIso,
         });
       }
     }
@@ -1609,7 +1950,12 @@ class AgKernelMonitorRuntime {
 
   async getSqlJs() {
     if (!this.sqlPromise) {
-      const wasmDir = path.join(this.extensionPath, "node_modules", "sql.js", "dist");
+      const wasmDir = path.join(
+        this.extensionPath,
+        "node_modules",
+        "sql.js",
+        "dist",
+      );
       this.sqlPromise = initSqlJs({
         locateFile: (file) => path.join(wasmDir, file),
       });
@@ -1639,56 +1985,84 @@ class AgKernelMonitorRuntime {
     try {
       bytes = new Uint8Array(fs.readFileSync(dbPath));
     } catch {
-      return this.cache.stateVscdb.value || {
-        chatSessions: [],
-        trajectories: [],
-        modelCredits: null,
-        modelPreferences: null,
-        sessionToWorkspace: new Map(),
-      };
+      return (
+        this.cache.stateVscdb.value || {
+          chatSessions: [],
+          trajectories: [],
+          modelCredits: null,
+          modelPreferences: null,
+          sessionToWorkspace: new Map(),
+        }
+      );
     }
     const db = new SQL.Database(bytes);
 
     try {
       const sessionToWorkspace = new Map();
-      const chatIndexRaw = readItemTableRawValue(db, "chat.ChatSessionStore.index");
-      const chatSessions = chatIndexRaw ? extractChatSessions(decodeStateValue(chatIndexRaw).parsedJson) : [];
+      const chatIndexRaw = readItemTableRawValue(
+        db,
+        "chat.ChatSessionStore.index",
+      );
+      const chatSessions = chatIndexRaw
+        ? extractChatSessions(decodeStateValue(chatIndexRaw).parsedJson)
+        : [];
       for (const session of chatSessions) {
         if (session.workspaceUri) {
           sessionToWorkspace.set(session.sessionId, session.workspaceUri);
         }
       }
 
-      const trajectoriesRaw = readItemTableRawValue(db, "antigravityUnifiedStateSync.trajectorySummaries");
+      const trajectoriesRaw = readItemTableRawValue(
+        db,
+        "antigravityUnifiedStateSync.trajectorySummaries",
+      );
       let trajectories = [];
       if (trajectoriesRaw) {
         const decoded = decodeStateValue(trajectoriesRaw);
-        trajectories = decoded.parsedJson !== null
-          ? extractTrajectoriesFromJson(decoded.parsedJson)
-          : extractTrajectorySummariesFromEncodedText(decoded.decodedText);
+        trajectories =
+          decoded.parsedJson !== null
+            ? extractTrajectoriesFromJson(decoded.parsedJson)
+            : extractTrajectorySummariesFromEncodedText(decoded.decodedText);
       }
       for (const trajectory of trajectories) {
         if (trajectory.workspaceUri) {
-          sessionToWorkspace.set(trajectory.conversationId, trajectory.workspaceUri);
+          sessionToWorkspace.set(
+            trajectory.conversationId,
+            trajectory.workspaceUri,
+          );
         }
       }
 
-      const creditsRaw = readItemTableRawValue(db, "antigravityUnifiedStateSync.modelCredits");
-      const creditsValue = creditsRaw ? decodeObjectLikeValue(creditsRaw) : null;
+      const creditsRaw = readItemTableRawValue(
+        db,
+        "antigravityUnifiedStateSync.modelCredits",
+      );
+      const creditsValue = creditsRaw
+        ? decodeObjectLikeValue(creditsRaw)
+        : null;
       let modelCredits = null;
       if (creditsValue && typeof creditsValue === "object") {
         modelCredits = {
           used: typeof creditsValue.used === "number" ? creditsValue.used : 0,
-          total: typeof creditsValue.total === "number" ? creditsValue.total : 0,
-          resetDate: typeof creditsValue.resetDate === "string" ? creditsValue.resetDate : undefined,
+          total:
+            typeof creditsValue.total === "number" ? creditsValue.total : 0,
+          resetDate:
+            typeof creditsValue.resetDate === "string"
+              ? creditsValue.resetDate
+              : undefined,
           raw: creditsValue,
         };
       } else if (creditsValue) {
         modelCredits = { used: 0, total: 0, raw: creditsValue };
       }
 
-      const modelPreferencesRaw = readItemTableRawValue(db, "antigravityUnifiedStateSync.modelPreferences");
-      const modelPreferences = modelPreferencesRaw ? decodeObjectLikeValue(modelPreferencesRaw) : null;
+      const modelPreferencesRaw = readItemTableRawValue(
+        db,
+        "antigravityUnifiedStateSync.modelPreferences",
+      );
+      const modelPreferences = modelPreferencesRaw
+        ? decodeObjectLikeValue(modelPreferencesRaw)
+        : null;
 
       const result = {
         chatSessions,
@@ -1707,7 +2081,10 @@ class AgKernelMonitorRuntime {
   async collectSnapshot() {
     const monitorConfig = loadMonitorConfig(this.configPath);
     const settingsSummary = {
-      autoRefreshSeconds: Math.max(0, Math.round(this.fallbackRefreshMs / 1000)),
+      autoRefreshSeconds: Math.max(
+        0,
+        Math.round(this.fallbackRefreshMs / 1000),
+      ),
       cliConfigPath: this.configPath || "",
       bunPath: "deprecated",
       preferActiveEditorWorkspace: true,
@@ -1715,7 +2092,11 @@ class AgKernelMonitorRuntime {
 
     const storageStamp = fileStamp(getStorageJsonPath());
     let storageResult;
-    if (storageStamp && this.cache.storageJson.stamp === storageStamp && this.cache.storageJson.value) {
+    if (
+      storageStamp &&
+      this.cache.storageJson.stamp === storageStamp &&
+      this.cache.storageJson.value
+    ) {
       storageResult = this.cache.storageJson.value;
     } else {
       storageResult = parseStorageJson();
@@ -1723,21 +2104,34 @@ class AgKernelMonitorRuntime {
     }
 
     const workspaceStorageEntries = scanWorkspaceStorage();
-    const workspaceRegistry = buildWorkspaceRegistry(storageResult.workspaces, workspaceStorageEntries);
+    const workspaceRegistry = buildWorkspaceRegistry(
+      storageResult.workspaces,
+      workspaceStorageEntries,
+    );
     const stateResult = await this.parseStateVscdb();
     const logSnapshot = scanLatestLogFile();
 
     if (this.liveState.activeLogConversationId) {
       logSnapshot.activeConversationId = this.liveState.activeLogConversationId;
     }
-    for (const [conversationId, messageCount] of this.liveState.logMessageCounts.entries()) {
+    for (const [
+      conversationId,
+      messageCount,
+    ] of this.liveState.logMessageCounts.entries()) {
       logSnapshot.messageCounts.set(conversationId, messageCount);
     }
 
     const conversations = scanConversations();
     const brainEntries = scanBrainFolders();
-    const brainByConversation = new Map(brainEntries.map((entry) => [entry.conversationId, entry]));
-    const trajectoryByConversation = new Map((stateResult.trajectories || []).map((entry) => [entry.conversationId, entry]));
+    const brainByConversation = new Map(
+      brainEntries.map((entry) => [entry.conversationId, entry]),
+    );
+    const trajectoryByConversation = new Map(
+      (stateResult.trajectories || []).map((entry) => [
+        entry.conversationId,
+        entry,
+      ]),
+    );
 
     const mappedStats = {
       conversationsTotal: conversations.length,
@@ -1752,17 +2146,38 @@ class AgKernelMonitorRuntime {
       conversationIds.add(conversationEntry.id);
       const brain = brainByConversation.get(conversationEntry.id);
       const trajectory = trajectoryByConversation.get(conversationEntry.id);
-      const stateUris = trajectory && trajectory.workspaceUris ? [...trajectory.workspaceUris] : trajectory && trajectory.workspaceUri ? [trajectory.workspaceUri] : [];
-      const vscdbSessionUri = stateResult.sessionToWorkspace.get(conversationEntry.id);
+      const stateUris =
+        trajectory && trajectory.workspaceUris
+          ? [...trajectory.workspaceUris]
+          : trajectory && trajectory.workspaceUri
+            ? [trajectory.workspaceUri]
+            : [];
+      const vscdbSessionUri = stateResult.sessionToWorkspace.get(
+        conversationEntry.id,
+      );
       if (vscdbSessionUri && !stateUris.includes(vscdbSessionUri)) {
         stateUris.unshift(vscdbSessionUri);
       }
       const brainUris = brain ? brain.workspaceUris : [];
 
-      const mapping = findWorkspaceMatch(stateUris, workspaceRegistry, "state_vscdb", 1.0, 0.92)
-        || findWorkspaceMatch(brainUris, workspaceRegistry, "brain_artifact", 0.8, 0.72)
-        || findWorkspaceByTitleHint([trajectory ? trajectory.title : null, brain ? brain.title : null], workspaceRegistry)
-        || {
+      const mapping = findWorkspaceMatch(
+        stateUris,
+        workspaceRegistry,
+        "state_vscdb",
+        1.0,
+        0.92,
+      ) ||
+        findWorkspaceMatch(
+          brainUris,
+          workspaceRegistry,
+          "brain_artifact",
+          0.8,
+          0.72,
+        ) ||
+        findWorkspaceByTitleHint(
+          [trajectory ? trajectory.title : null, brain ? brain.title : null],
+          workspaceRegistry,
+        ) || {
           workspaceId: UNMAPPED_WORKSPACE_ID,
           workspaceUri: UNMAPPED_WORKSPACE_URI,
           mappingSource: "unmapped",
@@ -1776,19 +2191,27 @@ class AgKernelMonitorRuntime {
         mappedStats.conversationsMapped += 1;
       }
 
-      const directMessageCount = logSnapshot.messageCounts.get(conversationEntry.id);
-      const messageCount = directMessageCount !== undefined
-        ? directMessageCount
-        : trajectory && trajectory.messageCount !== undefined
-          ? trajectory.messageCount
-          : null;
-      const messageCountSource = directMessageCount !== undefined
-        ? "log"
-        : trajectory && trajectory.messageCount !== undefined
-          ? "state_vscdb"
-          : null;
+      const directMessageCount = logSnapshot.messageCounts.get(
+        conversationEntry.id,
+      );
+      const messageCount =
+        directMessageCount !== undefined
+          ? directMessageCount
+          : trajectory && trajectory.messageCount !== undefined
+            ? trajectory.messageCount
+            : null;
+      const messageCountSource =
+        directMessageCount !== undefined
+          ? "log"
+          : trajectory && trajectory.messageCount !== undefined
+            ? "state_vscdb"
+            : null;
 
-      const activity = chooseLastActive(conversationEntry, logSnapshot, this.liveState);
+      const activity = chooseLastActive(
+        conversationEntry,
+        logSnapshot,
+        this.liveState,
+      );
       const metrics = estimateConversationMetrics({
         pbFileBytes: conversationEntry.pbFileBytes,
         brainFolderBytes: brain ? brain.totalBytes : 0,
@@ -1796,14 +2219,27 @@ class AgKernelMonitorRuntime {
         resolvedVersionCount: brain ? brain.resolvedVersionCount : 0,
         bytesPerToken: monitorConfig.bytesPerToken,
       });
-      const health = assessHealth(metrics.estimatedTotalTokens, monitorConfig.bloatLimit);
+      const health = assessHealth(
+        metrics.estimatedTotalTokens,
+        monitorConfig.bloatLimit,
+      );
       const chatRun = this.liveState.chatRuns.get(conversationEntry.id);
       const latestDelta = this.liveState.latestDeltas.get(conversationEntry.id);
-      const workspace = workspaceRegistry.get(mapping.workspaceUri) || Array.from(workspaceRegistry.values()).find((entry) => entry.id === mapping.workspaceId) || workspaceRegistry.get(UNMAPPED_WORKSPACE_URI);
+      const workspace =
+        workspaceRegistry.get(mapping.workspaceUri) ||
+        Array.from(workspaceRegistry.values()).find(
+          (entry) => entry.id === mapping.workspaceId,
+        ) ||
+        workspaceRegistry.get(UNMAPPED_WORKSPACE_URI);
 
       allConversations.push({
         id: conversationEntry.id,
-        title: trajectory && trajectory.title ? trajectory.title : brain && brain.title ? brain.title : null,
+        title:
+          trajectory && trajectory.title
+            ? trajectory.title
+            : brain && brain.title
+              ? brain.title
+              : null,
         workspaceId: mapping.workspaceId,
         workspaceName: workspace ? workspace.name : "[Unmapped]",
         workspaceUri: workspace ? workspace.uri : UNMAPPED_WORKSPACE_URI,
@@ -1822,23 +2258,38 @@ class AgKernelMonitorRuntime {
         estimatedPromptTokens: metrics.estimatedPromptTokens,
         estimatedArtifactTokens: metrics.estimatedArtifactTokens,
         estimatedTotalTokens: metrics.estimatedTotalTokens,
-        estimatedTotalTokensFormatted: formatTokens(metrics.estimatedTotalTokens),
+        estimatedTotalTokensFormatted: formatTokens(
+          metrics.estimatedTotalTokens,
+        ),
         contextRatio: metrics.estimatedTotalTokens / monitorConfig.bloatLimit,
-        contextRatioFormatted: formatRatio(metrics.estimatedTotalTokens / monitorConfig.bloatLimit),
-        whyHeavy: explainWhyHeavy(metrics.estimatedPromptTokens, metrics.estimatedArtifactTokens, metrics.estimatedTotalTokens, monitorConfig.bloatLimit),
+        contextRatioFormatted: formatRatio(
+          metrics.estimatedTotalTokens / monitorConfig.bloatLimit,
+        ),
+        whyHeavy: explainWhyHeavy(
+          metrics.estimatedPromptTokens,
+          metrics.estimatedArtifactTokens,
+          metrics.estimatedTotalTokens,
+          monitorConfig.bloatLimit,
+        ),
         health: health.status,
         healthTone: health.tone,
-        deltaEstimatedTokens: chatRun ? chatRun.currentRunDeltaTokens : (latestDelta ? latestDelta.deltaTokens : 0),
-        deltaEstimatedTokensFormatted: `+${formatTokens(Math.abs(chatRun ? chatRun.currentRunDeltaTokens : (latestDelta ? latestDelta.deltaTokens : 0)))}`,
-        historicalRuns: chatRun ? chatRun.recentRuns.map(r => ({
-           chatIndex: r.chatIndex,
-           messageCount: r.messageCount,
-           directMessages: r.directMessages,
-           deltaTokensFormatted: `${r.deltaTokens >= 0 ? "+" : "-"}${formatTokens(Math.abs(r.deltaTokens))}`,
-           fromTokensFormatted: formatTokens(r.fromTokens),
-           toTokensFormatted: formatTokens(r.toTokens),
-           completedAtRelative: relativeTime(r.completedAt)
-        })) : [],
+        deltaEstimatedTokens: chatRun
+          ? chatRun.currentRunDeltaTokens
+          : latestDelta
+            ? latestDelta.deltaTokens
+            : 0,
+        deltaEstimatedTokensFormatted: `+${formatTokens(Math.abs(chatRun ? chatRun.currentRunDeltaTokens : latestDelta ? latestDelta.deltaTokens : 0))}`,
+        historicalRuns: chatRun
+          ? chatRun.recentRuns.map((r) => ({
+              chatIndex: r.chatIndex,
+              messageCount: r.messageCount,
+              directMessages: r.directMessages,
+              deltaTokensFormatted: `${r.deltaTokens >= 0 ? "+" : "-"}${formatTokens(Math.abs(r.deltaTokens))}`,
+              fromTokensFormatted: formatTokens(r.fromTokens),
+              toTokensFormatted: formatTokens(r.toTokens),
+              completedAtRelative: relativeTime(r.completedAt),
+            }))
+          : [],
         isActive: logSnapshot.activeConversationId === conversationEntry.id,
       });
     }
@@ -1849,8 +2300,12 @@ class AgKernelMonitorRuntime {
       }
     }
 
-    if (logSnapshot.activeConversationId && !conversationIds.has(logSnapshot.activeConversationId)) {
-      this.liveState.unresolvedLogConversationId = logSnapshot.activeConversationId;
+    if (
+      logSnapshot.activeConversationId &&
+      !conversationIds.has(logSnapshot.activeConversationId)
+    ) {
+      this.liveState.unresolvedLogConversationId =
+        logSnapshot.activeConversationId;
     } else {
       this.liveState.unresolvedLogConversationId = null;
     }
@@ -1858,7 +2313,9 @@ class AgKernelMonitorRuntime {
     const workspaceBuckets = new Map();
     for (const conversation of allConversations) {
       if (!workspaceBuckets.has(conversation.workspaceId)) {
-        const workspaceEntry = Array.from(workspaceRegistry.values()).find((entry) => entry.id === conversation.workspaceId) || {
+        const workspaceEntry = Array.from(workspaceRegistry.values()).find(
+          (entry) => entry.id === conversation.workspaceId,
+        ) || {
           id: conversation.workspaceId,
           uri: conversation.workspaceUri,
           name: conversation.workspaceName,
@@ -1867,18 +2324,31 @@ class AgKernelMonitorRuntime {
           id: workspaceEntry.id,
           name: workspaceEntry.name,
           uri: workspaceEntry.uri,
-          uriHint: buildWorkspaceUriHint(workspaceEntry.uri, workspaceEntry.name),
+          uriHint: buildWorkspaceUriHint(
+            workspaceEntry.uri,
+            workspaceEntry.name,
+          ),
           conversations: [],
         });
       }
-      workspaceBuckets.get(conversation.workspaceId).conversations.push(conversation);
+      workspaceBuckets
+        .get(conversation.workspaceId)
+        .conversations.push(conversation);
     }
 
     let workspaces = Array.from(workspaceBuckets.values()).map((workspace) => {
-      const conversationsForWorkspace = workspace.conversations.sort((left, right) => right.estimatedTotalTokens - left.estimatedTotalTokens);
+      const conversationsForWorkspace = workspace.conversations.sort(
+        (left, right) => right.estimatedTotalTokens - left.estimatedTotalTokens,
+      );
       const largestConversation = conversationsForWorkspace[0] || null;
-      const totalEstimatedTokens = conversationsForWorkspace.reduce((sum, conversation) => sum + conversation.estimatedTotalTokens, 0);
-      const health = assessHealth(largestConversation ? largestConversation.estimatedTotalTokens : 0, monitorConfig.bloatLimit);
+      const totalEstimatedTokens = conversationsForWorkspace.reduce(
+        (sum, conversation) => sum + conversation.estimatedTotalTokens,
+        0,
+      );
+      const health = assessHealth(
+        largestConversation ? largestConversation.estimatedTotalTokens : 0,
+        monitorConfig.bloatLimit,
+      );
       return {
         id: workspace.id,
         name: workspace.name,
@@ -1888,16 +2358,44 @@ class AgKernelMonitorRuntime {
         estimatedTokens: totalEstimatedTokens,
         estimatedTokensFormatted: formatTokens(totalEstimatedTokens),
         conversationCount: conversationsForWorkspace.length,
-        activeConversationCount: conversationsForWorkspace.filter((conversation) => conversation.isActive).length,
-        largestConversationId: largestConversation ? largestConversation.id : null,
-        largestConversationTokens: largestConversation ? largestConversation.estimatedTotalTokens : 0,
-        largestConversationTokensFormatted: largestConversation ? largestConversation.estimatedTotalTokensFormatted : "0",
-        mappedConversationCount: conversationsForWorkspace.filter((conversation) => conversation.mappingSource !== "unmapped").length,
-        unmappedConversationCount: conversationsForWorkspace.filter((conversation) => conversation.mappingSource === "unmapped").length,
-        brainSizeBytes: conversationsForWorkspace.reduce((sum, conversation) => sum + conversation.brainFolderBytes, 0),
-        brainSizeFormatted: formatBytes(conversationsForWorkspace.reduce((sum, conversation) => sum + conversation.brainFolderBytes, 0)),
-        pbSizeBytes: conversationsForWorkspace.reduce((sum, conversation) => sum + conversation.pbFileBytes, 0),
-        pbSizeFormatted: formatBytes(conversationsForWorkspace.reduce((sum, conversation) => sum + conversation.pbFileBytes, 0)),
+        activeConversationCount: conversationsForWorkspace.filter(
+          (conversation) => conversation.isActive,
+        ).length,
+        largestConversationId: largestConversation
+          ? largestConversation.id
+          : null,
+        largestConversationTokens: largestConversation
+          ? largestConversation.estimatedTotalTokens
+          : 0,
+        largestConversationTokensFormatted: largestConversation
+          ? largestConversation.estimatedTotalTokensFormatted
+          : "0",
+        mappedConversationCount: conversationsForWorkspace.filter(
+          (conversation) => conversation.mappingSource !== "unmapped",
+        ).length,
+        unmappedConversationCount: conversationsForWorkspace.filter(
+          (conversation) => conversation.mappingSource === "unmapped",
+        ).length,
+        brainSizeBytes: conversationsForWorkspace.reduce(
+          (sum, conversation) => sum + conversation.brainFolderBytes,
+          0,
+        ),
+        brainSizeFormatted: formatBytes(
+          conversationsForWorkspace.reduce(
+            (sum, conversation) => sum + conversation.brainFolderBytes,
+            0,
+          ),
+        ),
+        pbSizeBytes: conversationsForWorkspace.reduce(
+          (sum, conversation) => sum + conversation.pbFileBytes,
+          0,
+        ),
+        pbSizeFormatted: formatBytes(
+          conversationsForWorkspace.reduce(
+            (sum, conversation) => sum + conversation.pbFileBytes,
+            0,
+          ),
+        ),
         health: health.status,
         healthTone: health.tone,
         conversations: conversationsForWorkspace,
@@ -1905,10 +2403,23 @@ class AgKernelMonitorRuntime {
     });
 
     workspaces = disambiguateWorkspaceDisplayNames(workspaces);
-    const currentConversation = chooseCurrentConversation(allConversations, this.liveState, logSnapshot);
-    workspaces = sortWorkspacesForDisplay(workspaces, currentConversation.conversation ? currentConversation.conversation.workspaceId : null);
+    const currentConversation = chooseCurrentConversation(
+      allConversations,
+      this.liveState,
+      logSnapshot,
+    );
+    workspaces = sortWorkspacesForDisplay(
+      workspaces,
+      currentConversation.conversation
+        ? currentConversation.conversation.workspaceId
+        : null,
+    );
 
-    const selectedWorkspace = chooseWorkspaceDetail(workspaces, this.preferredWorkspacePath, currentConversation.conversation);
+    const selectedWorkspace = chooseWorkspaceDetail(
+      workspaces,
+      this.preferredWorkspacePath,
+      currentConversation.conversation,
+    );
     const orphanAnnotations = [];
     const annotationsDir = getAnnotationsDir();
     if (fs.existsSync(annotationsDir)) {
@@ -1928,9 +2439,15 @@ class AgKernelMonitorRuntime {
         mappedConversations: mappedStats.conversationsMapped,
         unmappedConversations: mappedStats.conversationsUnmapped,
         orphanBrainFolders: mappedStats.orphanBrainFolders,
-        currentWorkspaceName: currentConversation.conversation ? currentConversation.conversation.workspaceName : "None",
-        currentContextFormatted: currentConversation.conversation ? currentConversation.conversation.estimatedTotalTokensFormatted : "0",
-        currentContextRatio: currentConversation.conversation ? currentConversation.conversation.contextRatioFormatted : "0%",
+        currentWorkspaceName: currentConversation.conversation
+          ? currentConversation.conversation.workspaceName
+          : "None",
+        currentContextFormatted: currentConversation.conversation
+          ? currentConversation.conversation.estimatedTotalTokensFormatted
+          : "0",
+        currentContextRatio: currentConversation.conversation
+          ? currentConversation.conversation.contextRatioFormatted
+          : "0%",
         resolutionState: currentConversation.resolutionState,
         resolutionNote: currentConversation.resolutionNote,
       },
@@ -1943,13 +2460,29 @@ class AgKernelMonitorRuntime {
         : null,
       workspaces,
       cleanupSummary: {
-        largestSessions: [...allConversations].sort((left, right) => right.estimatedTotalTokens - left.estimatedTotalTokens).slice(0, 8),
-        unmappedConversations: allConversations.filter((conversation) => conversation.mappingSource === "unmapped"),
+        largestSessions: [...allConversations]
+          .sort(
+            (left, right) =>
+              right.estimatedTotalTokens - left.estimatedTotalTokens,
+          )
+          .slice(0, 8),
+        unmappedConversations: allConversations.filter(
+          (conversation) => conversation.mappingSource === "unmapped",
+        ),
         recommendedCleanupTargets: [...allConversations]
-          .sort((left, right) => right.estimatedTotalTokens - left.estimatedTotalTokens)
-          .filter((conversation) => conversation.contextRatio >= 0.8 || conversation.mappingSource === "unmapped")
+          .sort(
+            (left, right) =>
+              right.estimatedTotalTokens - left.estimatedTotalTokens,
+          )
+          .filter(
+            (conversation) =>
+              conversation.contextRatio >= 0.8 ||
+              conversation.mappingSource === "unmapped",
+          )
           .slice(0, 5),
-        orphanBrainFolders: brainEntries.filter((entry) => !conversationIds.has(entry.conversationId)).map((entry) => entry.conversationId),
+        orphanBrainFolders: brainEntries
+          .filter((entry) => !conversationIds.has(entry.conversationId))
+          .map((entry) => entry.conversationId),
         orphanAnnotations,
       },
       settingsSummary,
@@ -1967,17 +2500,28 @@ function readItemTableRawValue(db, key) {
     const row = statement.getAsObject();
     const value = row.value;
     if (typeof value === "string") return value;
-    if (value instanceof Uint8Array) return Buffer.from(value).toString("utf-8");
-    if (value && value.buffer instanceof ArrayBuffer) return Buffer.from(value).toString("utf-8");
+    if (value instanceof Uint8Array)
+      return Buffer.from(value).toString("utf-8");
+    if (value && value.buffer instanceof ArrayBuffer)
+      return Buffer.from(value).toString("utf-8");
     return value === null || value === undefined ? null : String(value);
   } finally {
     statement.free();
   }
 }
 
-function buildLiveEvents(previousSnapshot, nextSnapshot, pbChanges, logChanges) {
-  const previousIndex = indexById(previousSnapshot ? previousSnapshot.allConversations || [] : []);
-  const nextIndex = indexById(nextSnapshot ? nextSnapshot.allConversations || [] : []);
+function buildLiveEvents(
+  previousSnapshot,
+  nextSnapshot,
+  pbChanges,
+  logChanges,
+) {
+  const previousIndex = indexById(
+    previousSnapshot ? previousSnapshot.allConversations || [] : [],
+  );
+  const nextIndex = indexById(
+    nextSnapshot ? nextSnapshot.allConversations || [] : [],
+  );
   const events = [];
 
   for (const change of pbChanges) {
@@ -1985,7 +2529,8 @@ function buildLiveEvents(previousSnapshot, nextSnapshot, pbChanges, logChanges) 
     const previousConversation = previousIndex.get(change.conversationId);
     if (!nextConversation) continue;
     const deltaTokens = previousConversation
-      ? nextConversation.estimatedTotalTokens - previousConversation.estimatedTotalTokens
+      ? nextConversation.estimatedTotalTokens -
+        previousConversation.estimatedTotalTokens
       : Math.round(change.deltaBytes / 3.5);
 
     events.push({
@@ -2011,9 +2556,17 @@ function buildLiveEvents(previousSnapshot, nextSnapshot, pbChanges, logChanges) 
     const previousConversation = previousIndex.get(update.conversationId);
     if (!nextConversation) continue;
     const nextCount = nextConversation.messageCount;
-    const previousCount = previousConversation ? previousConversation.messageCount : null;
-    const deltaMessages = nextCount !== null && previousCount !== null ? nextCount - previousCount : null;
-    const deltaTokens = previousConversation ? nextConversation.estimatedTotalTokens - previousConversation.estimatedTotalTokens : 0;
+    const previousCount = previousConversation
+      ? previousConversation.messageCount
+      : null;
+    const deltaMessages =
+      nextCount !== null && previousCount !== null
+        ? nextCount - previousCount
+        : null;
+    const deltaTokens = previousConversation
+      ? nextConversation.estimatedTotalTokens -
+        previousConversation.estimatedTotalTokens
+      : 0;
 
     events.push({
       id: `${update.timestamp}-${update.conversationId}-log`,
@@ -2036,7 +2589,11 @@ function buildLiveEvents(previousSnapshot, nextSnapshot, pbChanges, logChanges) 
   }
 
   return events
-    .sort((left, right) => new Date(right.timestamp).getTime() - new Date(left.timestamp).getTime())
+    .sort(
+      (left, right) =>
+        new Date(right.timestamp).getTime() -
+        new Date(left.timestamp).getTime(),
+    )
     .slice(0, LIVE_FEED_LIMIT);
 }
 
@@ -2056,6 +2613,35 @@ function readAppendedText(filePath, offset, nextSize) {
   }
 }
 
+function inferLikelyConversationId(liveState, timestamp) {
+  const now = new Date(timestamp).getTime();
+  const candidates = Array.from(liveState.recentPbActivity.entries())
+    .map(([conversationId, seenAt]) => ({
+      conversationId,
+      ageMs: now - new Date(seenAt).getTime(),
+    }))
+    .filter(
+      (candidate) =>
+        Number.isFinite(candidate.ageMs) &&
+        candidate.ageMs >= 0 &&
+        candidate.ageMs <= 20000,
+    )
+    .sort((left, right) => left.ageMs - right.ageMs);
+
+  if (candidates.length === 0) {
+    return liveState.activeLogConversationId || null;
+  }
+
+  if (
+    candidates.length > 1 &&
+    candidates[1].ageMs - candidates[0].ageMs < 1500
+  ) {
+    return null;
+  }
+
+  return candidates[0].conversationId;
+}
+
 function ensureChatRunState(liveState, conversationId, currentTokens) {
   const existing = liveState.chatRuns.get(conversationId);
   if (existing) {
@@ -2068,28 +2654,50 @@ function ensureChatRunState(liveState, conversationId, currentTokens) {
     currentRunStartMessageCount: null,
     currentRunDeltaTokens: 0,
     currentRunStartedAt: null,
+    lastProgressAt: null,
     lastMessageCount: null,
     recentRuns: [],
     observedCompletedTurns: 0,
     observedTokensAdded: 0,
     observedDirectMessages: 0,
+    observedTurnsWithDirectMessages: 0,
   };
   liveState.chatRuns.set(conversationId, created);
   return created;
 }
 
-function recordChatProgress(liveState, conversationId, totalTokens, deltaTokens, timestamp) {
-  const state = ensureChatRunState(liveState, conversationId, totalTokens - deltaTokens);
+function recordChatProgress(
+  liveState,
+  conversationId,
+  totalTokens,
+  deltaTokens,
+  timestamp,
+) {
+  const state = ensureChatRunState(
+    liveState,
+    conversationId,
+    totalTokens - deltaTokens,
+  );
   if (!state.currentRunStartedAt) {
     state.currentRunStartedAt = timestamp;
   }
-  if (state.lastMessageCount === null && state.currentRunStartTokens === totalTokens) {
+  if (
+    state.lastMessageCount === null &&
+    state.currentRunStartTokens === totalTokens
+  ) {
     state.currentRunStartTokens = totalTokens - deltaTokens;
   }
   state.currentRunDeltaTokens = totalTokens - state.currentRunStartTokens;
+  state.lastProgressAt = timestamp;
 }
 
-function recordChatBoundary(liveState, conversationId, messageCount, totalTokens, timestamp) {
+function recordChatBoundary(
+  liveState,
+  conversationId,
+  messageCount,
+  totalTokens,
+  timestamp,
+) {
   const state = ensureChatRunState(liveState, conversationId, totalTokens);
 
   if (state.lastMessageCount === null) {
@@ -2098,6 +2706,7 @@ function recordChatBoundary(liveState, conversationId, messageCount, totalTokens
     state.currentRunStartMessageCount = messageCount;
     state.currentRunDeltaTokens = 0;
     state.currentRunStartedAt = timestamp;
+    state.lastProgressAt = timestamp;
     return null;
   }
 
@@ -2107,12 +2716,25 @@ function recordChatBoundary(liveState, conversationId, messageCount, totalTokens
     state.currentRunStartTokens = totalTokens;
     state.currentRunDeltaTokens = 0;
     state.currentRunStartedAt = timestamp;
+    state.lastProgressAt = timestamp;
     return null;
   }
 
-  const directMessages = state.currentRunStartMessageCount !== null
-    ? Math.max(0, messageCount - state.currentRunStartMessageCount)
-    : Math.max(0, messageCount - state.lastMessageCount);
+  if (
+    state.currentRunDeltaTokens === 0 &&
+    state.currentRunStartTokens === totalTokens
+  ) {
+    state.lastMessageCount = messageCount;
+    state.currentRunStartMessageCount = messageCount;
+    state.currentRunStartedAt = timestamp;
+    state.lastProgressAt = timestamp;
+    return null;
+  }
+
+  const directMessages =
+    state.currentRunStartMessageCount !== null
+      ? Math.max(0, messageCount - state.currentRunStartMessageCount)
+      : Math.max(0, messageCount - state.lastMessageCount);
   const completed = {
     chatIndex: state.nextChatIndex,
     startedAt: state.currentRunStartedAt,
@@ -2128,13 +2750,72 @@ function recordChatBoundary(liveState, conversationId, messageCount, totalTokens
   state.observedCompletedTurns += 1;
   state.observedTokensAdded += completed.deltaTokens;
   state.observedDirectMessages += directMessages;
+  state.observedTurnsWithDirectMessages += 1;
   state.nextChatIndex += 1;
   state.lastMessageCount = messageCount;
   state.currentRunStartTokens = totalTokens;
   state.currentRunStartMessageCount = messageCount;
   state.currentRunDeltaTokens = 0;
   state.currentRunStartedAt = timestamp;
+  state.lastProgressAt = timestamp;
   return completed;
+}
+
+function finalizeQuietTurns(liveState, timestamp) {
+  const nowMs = new Date(timestamp).getTime();
+  let finalized = false;
+
+  for (const state of liveState.chatRuns.values()) {
+    if (!state.currentRunStartedAt || !state.lastProgressAt) {
+      continue;
+    }
+    if (state.currentRunDeltaTokens <= 0) {
+      continue;
+    }
+
+    const idleMs = nowMs - new Date(state.lastProgressAt).getTime();
+    if (!Number.isFinite(idleMs) || idleMs < QUIET_TURN_FINALIZE_MS) {
+      continue;
+    }
+
+    const directMessages =
+      state.currentRunStartMessageCount !== null &&
+      state.lastMessageCount !== null
+        ? Math.max(
+            0,
+            state.lastMessageCount - state.currentRunStartMessageCount,
+          )
+        : null;
+    const completed = {
+      chatIndex: state.nextChatIndex,
+      startedAt: state.currentRunStartedAt,
+      completedAt: timestamp,
+      fromTokens: state.currentRunStartTokens,
+      toTokens: state.currentRunStartTokens + state.currentRunDeltaTokens,
+      deltaTokens: state.currentRunDeltaTokens,
+      messageCount: state.lastMessageCount,
+      directMessages,
+    };
+
+    state.recentRuns = [completed, ...state.recentRuns].slice(0, 5);
+    state.observedCompletedTurns += 1;
+    state.observedTokensAdded += completed.deltaTokens;
+    if (directMessages !== null) {
+      state.observedDirectMessages += directMessages;
+      state.observedTurnsWithDirectMessages += 1;
+    }
+    state.nextChatIndex += 1;
+    state.currentRunStartTokens = completed.toTokens;
+    state.currentRunDeltaTokens = 0;
+    state.currentRunStartedAt = timestamp;
+    state.lastProgressAt = timestamp;
+    if (state.lastMessageCount !== null) {
+      state.currentRunStartMessageCount = state.lastMessageCount;
+    }
+    finalized = true;
+  }
+
+  return finalized;
 }
 
 module.exports = {

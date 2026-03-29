@@ -305,7 +305,7 @@ function renderRecentChatRuns(current) {
   if (runs.length === 0) return "";
   return `
     <div class="tree-subitems-header empty" style="margin-top:4px;">Recent Observed Turns:</div>
-    ${runs.slice(0, 5).map(run => renderTreeItem("", `Turn ${run.chatIndex} • +${run.directMessages} msgs`, `${run.deltaTokensFormatted}`)).join("")}
+    ${runs.slice(0, 5).map(run => renderTreeItem("", `Turn ${run.chatIndex} | ${run.directMessages === null || run.directMessages === undefined ? "? msgs" : `+${run.directMessages} msgs`}`, `${run.deltaTokensFormatted}`)).join("")}
   `;
 }
 
