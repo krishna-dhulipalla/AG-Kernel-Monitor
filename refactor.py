@@ -1,208 +1,22 @@
-const vscode = require("vscode");
-const path = require("path");
-const { AgKernelMonitorRuntime } = require("./monitor-runtime.cjs");
+import re
 
-function activate(context) {
-  const output = vscode.window.createOutputChannel("AG Kernel Monitor");
-  const runtime = new AgKernelMonitorRuntime(context.extensionPath);
-  const provider = new AgKernelSidebarProvider(runtime, output);
+def main():
+    path = "vscode/extension.cjs"
+    with open(path, "r", encoding="utf-8") as f:
+        content = f.read()
 
-  context.subscriptions.push(output);
-  context.subscriptions.push(
-    vscode.window.registerWebviewViewProvider("agKernelMonitor.sidebar", provider, {
-      webviewOptions: { retainContextWhenHidden: true },
-    }),
-    vscode.commands.registerCommand("agKernelMonitor.refresh", () => provider.refresh(true)),
-    vscode.commands.registerCommand("agKernelMonitor.openSettings", () => {
-      void vscode.commands.executeCommand("workbench.action.openSettings", "agKernelMonitor");
-    }),
-    vscode.commands.registerCommand("agKernelMonitor.openOutput", () => output.show(true)),
-    vscode.workspace.onDidChangeConfiguration((event) => {
-      if (event.affectsConfiguration("agKernelMonitor")) {
-        provider.onConfigurationChanged();
-      }
-    }),
-    vscode.workspace.onDidChangeWorkspaceFolders(() => provider.onWorkspaceContextChanged()),
-    vscode.window.onDidChangeActiveTextEditor(() => provider.onWorkspaceContextChanged()),
-  );
-}
-
-function deactivate() {}
-
-class AgKernelSidebarProvider {
-  constructor(runtime, output) {
-    this.runtime = runtime;
-    this.output = output;
-    this.view = null;
-    this.lastSnapshot = null;
-    this.lastError = null;
-    this.sectionState = {};
-    this.isActive = false;
-  }
-
-  resolveWebviewView(webviewView) {
-    this.view = webviewView;
-    webviewView.webview.options = { enableScripts: true };
-
-    webviewView.webview.onDidReceiveMessage((message) => {
-      if (message?.type === "refresh") {
-        void this.refresh(true);
-        return;
-      }
-      if (message?.type === "openSettings") {
-        void vscode.commands.executeCommand("agKernelMonitor.openSettings");
-        return;
-      }
-      if (message?.type === "openOutput") {
-        this.output.show(true);
-        return;
-      }
-      if (message?.type === "toggleSection" && message.sectionId) {
-        this.sectionState[message.sectionId] = Boolean(message.open);
-      }
-      if (message?.type === "clean") {
-        vscode.window.showInformationMessage("Cleanup functionality is scheduled for Phase 2 Implementation.");
-        return;
-      }
-    });
-
-    webviewView.onDidChangeVisibility(() => {
-      if (webviewView.visible) {
-        void this.start();
-      } else {
-        this.stop();
-      }
-    });
-
-    webviewView.onDidDispose(() => {
-      this.stop();
-      this.view = null;
-    });
-
-    this.render();
-    if (webviewView.visible) {
-      void this.start();
-    }
-  }
-
-  onConfigurationChanged() {
-    if (this.isActive) {
-      void this.start(true);
-    } else {
-      this.render();
-    }
-  }
-
-  onWorkspaceContextChanged() {
-    if (this.isActive) {
-      void this.refresh(false);
-    }
-  }
-
-  async start(restart = false) {
-    if (!this.view) return;
-    if (restart) {
-      this.stop();
-    }
-    if (this.isActive) return;
-
-    this.isActive = true;
-    this.lastError = null;
-    this.render();
-
-    try {
-      const settings = readSettings();
-      await this.runtime.start({
-        preferredWorkspacePath: getPreferredWorkspacePath(),
-        configPath: resolveConfiguredPath(settings.cliConfigPath),
-        autoRefreshSeconds: settings.autoRefreshSeconds,
-        onUpdate: (snapshot) => {
-          this.lastSnapshot = snapshot;
-          this.lastError = null;
-          this.render();
-        },
-        onError: (error) => {
-          this.lastError = error;
-          this.output.appendLine(`[error] ${String(error?.stack || error?.message || error)}`);
-          this.render();
-        },
-      });
-    } catch (error) {
-      this.lastError = error;
-      this.output.appendLine(`[error] ${String(error?.stack || error?.message || error)}`);
-      this.render();
-    }
-  }
-
-  stop() {
-    this.isActive = false;
-    this.runtime.stop();
-  }
-
-  async refresh(forceRevealErrors) {
-    if (!this.view) return;
-    this.runtime.preferredWorkspacePath = getPreferredWorkspacePath();
-    this.runtime.configPath = resolveConfiguredPath(readSettings().cliConfigPath);
-    try {
-      await this.runtime.refresh();
-    } catch (error) {
-      this.lastError = error;
-      if (forceRevealErrors) {
-        this.output.show(true);
-      }
-      this.render();
-    }
-  }
-
-  render() {
-    if (!this.view) return;
-    this.view.webview.html = getHtml(this.view.webview, {
-      snapshot: this.lastSnapshot,
-      error: this.lastError,
-      sectionState: this.sectionState,
-      isActive: this.isActive,
-    });
-  }
-}
-
-function readSettings() {
-  const config = vscode.workspace.getConfiguration("agKernelMonitor");
-  return {
-    bunPath: config.get("bunPath", "bun"),
-    cliConfigPath: config.get("cliConfigPath", ""),
-    autoRefreshSeconds: config.get("autoRefreshSeconds", 20),
-    preferActiveEditorWorkspace: config.get("preferActiveEditorWorkspace", true),
-  };
-}
-
-function getPreferredWorkspacePath() {
-  const settings = readSettings();
-  if (settings.preferActiveEditorWorkspace) {
-    const activeEditor = vscode.window.activeTextEditor;
-    if (activeEditor) {
-      const folder = vscode.workspace.getWorkspaceFolder(activeEditor.document.uri);
-      if (folder) {
-        return folder.uri.fsPath;
-      }
-    }
-  }
-
-  return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || null;
-}
-
-function resolveConfiguredPath(configPath) {
-  if (!configPath) return null;
-  if (path.isAbsolute(configPath)) return configPath;
-
-  const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
-  if (workspaceFolder) {
-    return path.join(workspaceFolder.uri.fsPath, configPath);
-  }
-
-  return path.resolve(configPath);
-}
-
-const SVGS = {
+    # Find boundaries
+    start_str = "function getHtml(webview, model) {"
+    end_str = "function formatCompactTokens(tokens) {"
+    
+    start_idx = content.find(start_str)
+    end_idx = content.find(end_str)
+    
+    if start_idx == -1 or end_idx == -1:
+        print("Could not find start or end markers")
+        return
+        
+    UI_CODE = """const SVGS = {
   info: `<svg viewBox="0 0 16 16" width="16" height="16" fill="currentColor"><path d="M8 1.5a6.5 6.5 0 1 0 0 13 6.5 6.5 0 0 0 0-13zM0 8a8 8 0 1 1 16 0A8 8 0 0 1 0 8z"/><path d="M8.93 6.588l-2.29.287-.082.38.45.083c.294.07.352.176.288.469l-.738 3.468c-.194.897.105 1.319.808 1.319.545 0 1.178-.252 1.465-.598l.088-.416c-.2.176-.492.246-.686.246-.275 0-.375-.193-.304-.533L8.93 6.588zM9 4.5a1 1 0 1 1-2 0 1 1 0 0 1 2 0z"/></svg>`,
   pulse: `<svg viewBox="0 0 16 16" width="16" height="16" fill="currentColor"><path fill-rule="evenodd" d="M8 1.5a6.5 6.5 0 100 13 6.5 6.5 0 000-13zM0 8a8 8 0 1116 0A8 8 0 010 8z" clip-rule="evenodd"/><path d="M11.5 7h-2.12l-1.05 4.04a.5.5 0 01-.95-.08l-1.46-5.87L4.62 7.5A.5.5 0 014 7h-1v-1h2.12l1.05-4.04a.5.5 0 01.95.08l1.46 5.87L9.38 5.5A.5.5 0 0110 6h2v1h-.5z"/></svg>`,
   files: `<svg viewBox="0 0 16 16" width="16" height="16" fill="currentColor"><path d="M3.5 2A1.5 1.5 0 002 3.5v9A1.5 1.5 0 003.5 14h9a1.5 1.5 0 001.5-1.5v-7A1.5 1.5 0 0012.5 4H9.7l-1-1.5H3.5zM3 3.5a.5.5 0 01.5-.5h4.79l1 1.5H12.5a.5.5 0 01.5.5v7a.5.5 0 01-.5.5h-9a.5.5 0 01-.5-.5v-9z"/></svg>`,
@@ -275,7 +89,7 @@ function renderOverview(snapshot, current) {
   const tone = toneClass(current?.healthTone || "neutral");
   return `
     ${renderTreeItem(SVGS.pulse, "State", formatResolutionLabel(overview.resolutionState), "", tone)}
-    ${renderTreeItem(SVGS.graph, "Session Total", current ? `${current.estimatedTotalTokensFormatted} (${current.contextRatioFormatted})` : "0")}
+    ${renderTreeItem(SVGS.graph, "Current Context", current ? `${current.estimatedTotalTokensFormatted} (${current.contextRatioFormatted})` : "0")}
     ${renderTreeItem(SVGS.link, "Mapped workspaces", `${overview.mappedConversations}/${overview.totalConversations}`)}
     ${renderTreeItem(SVGS.info, "Unmapped sessions", String(overview.unmappedConversations))}
   `;
@@ -285,21 +99,30 @@ function renderCurrentConversation(snapshot, current) {
   if (!snapshot || !current) return '<div class="empty">No current conversation could be resolved.</div>';
   const label = current.title || "Untitled";
   return `
-    ${renderTreeItem(SVGS.folder, label, "", current.healthTone === "neutral" ? "" : current.health, current.healthTone)}
-    ${renderTreeItem(SVGS.graph, "Session Total", `${current.estimatedTotalTokensFormatted} (${current.contextRatioFormatted})`)}
-    ${renderTreeItem(SVGS.pulse, "Current Turn Added", current.deltaEstimatedTokensFormatted || "+0")}
+    ${renderTreeItem(SVGS.folder, label, "", current.health, current.healthTone)}
+    ${renderTreeItem(SVGS.graph, "Total Tokens", `${current.estimatedTotalTokensFormatted} (${current.contextRatioFormatted})`)}
+    ${renderTreeItem(SVGS.pulse, "Latest Delta", current.deltaEstimatedTokensFormatted || "+0")}
     ${renderTreeItem(SVGS.time, "Last Active", current.lastActiveRelative || "unknown")}
-    ${renderTreeItem(SVGS.info, "Direct Messages", current.messageCount !== null ? `${current.messageCount}${current.messageCountSource ? ` (${current.messageCountSource})` : ""}` : "unknown")}
+    ${renderTreeItem(SVGS.info, "Messages", current.messageCount !== null ? `${current.messageCount}${current.messageCountSource ? ` (${current.messageCountSource})` : ""}` : "unknown")}
+    ${renderCurrentChatRun(current) || ""}
     ${renderRecentChatRuns(current) || ""}
   `;
 }
 
+function renderCurrentChatRun(current) {
+  const run = current.currentChatRun;
+  if (!run) return ''; 
+  return `
+    ${renderTreeItem(SVGS.terminal, `Chat ${run.chatIndex}`, `${formatCompactTokens(run.fromTokens)} -> ${formatCompactTokens(run.toTokens)} (${run.deltaTokens >= 0 ? "+" : "-"}${formatCompactTokens(Math.abs(run.deltaTokens))})`)}
+  `;
+}
+
 function renderRecentChatRuns(current) {
-  const runs = current.historicalRuns || [];
+  const runs = current.recentChatRuns || [];
   if (runs.length === 0) return "";
   return `
-    <div class="tree-subitems-header empty" style="margin-top:4px;">Previous Turns:</div>
-    ${runs.slice(0, 5).map(run => renderTreeItem(SVGS.time, `Turn at ${run.messageCount} msgs`, `${run.deltaTokensFormatted}`)).join("")}
+    <div class="tree-subitems-header empty" style="margin-top:4px;">Last (${Math.min(5, runs.length)}) Chats:</div>
+    ${runs.slice(0, 5).map(run => renderTreeItem(SVGS.time, `Chat ${run.chatIndex} completed`, `${run.deltaTokens >= 0 ? "+" : "-"}${formatCompactTokens(Math.abs(run.deltaTokens))}`)).join("")}
   `;
 }
 
@@ -526,61 +349,13 @@ function getStyles() {
     .log-line:hover { background: var(--vscode-list-hoverBackground, rgba(130, 130, 130, 0.1)); }
   `;
 }
+"""
+    new_content = content[:start_idx] + UI_CODE + "\\n" + content[end_idx:]
+    
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(new_content)
+        
+    print("Done refactoring UI!")
 
-function isOpen(sectionState, id, defaultOpen) {
-  if (Object.prototype.hasOwnProperty.call(sectionState, id)) {
-    return Boolean(sectionState[id]);
-  }
-  return defaultOpen;
-}
-
-function formatResolutionLabel(state) {
-  if (state === "active_log") return "Live log";
-  if (state === "active_pb_write") return "Recent write";
-  if (state === "unresolved_log_uuid") return "Log fallback";
-  return "Recent fallback";
-}
-
-function formatCompactTokens(tokens) {
-  const absolute = Math.abs(tokens);
-  if (absolute >= 1_000_000) return `${(tokens / 1_000_000).toFixed(1)}M`;
-  if (absolute >= 1_000) return `${Math.round(tokens / 1_000)}K`;
-  return String(tokens);
-}
-
-function formatLiveEventLine(event) {
-  const time = new Date(event.timestamp).toLocaleTimeString();
-  const session = `${event.conversationId.slice(0, 12)}...`;
-
-  if (event.source === "log" && event.messageCount !== undefined) {
-    const deltaMessages = event.deltaMessages !== null && event.deltaMessages !== undefined
-      ? ` (${event.deltaMessages >= 0 ? "+" : ""}${event.deltaMessages} since last)`
-      : "";
-    return `[${time}] [LIVE] ${session} now at ${event.messageCount} direct messages${deltaMessages} -> ${event.totalTokensFormatted} estimated tokens (${event.contextRatioFormatted} of limit)`;
-  }
-
-  return `[${time}] ${session} ${event.deltaBytesFormatted} (${event.deltaTokensFormatted} est. tokens) -> ${event.totalTokensFormatted} estimated total (${event.contextRatioFormatted} of limit)`;
-}
-
-function escapeHtml(value) {
-  return String(value)
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#39;");
-}
-
-function createNonce() {
-  const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-  let nonce = "";
-  for (let index = 0; index < 32; index += 1) {
-    nonce += chars.charAt(Math.floor(Math.random() * chars.length));
-  }
-  return nonce;
-}
-
-module.exports = {
-  activate,
-  deactivate,
-};
+if __name__ == "__main__":
+    main()

@@ -2,7 +2,7 @@
   "name": "ag-kernel-monitor",
   "displayName": "Antigravity Context Monitor",
   "publisher": "Krishnadhulipalla",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "Token consumption, context bloat, and cache monitoring for AI chat sessions",
   "icon": "media/icon.png",
   "type": "module",
@@ -24,7 +24,7 @@
       "activitybar": [
         {
           "id": "agKernelMonitor",
-          "title": "AG Context",
+          "title": "AG Context Monitor",
           "icon": "vscode/media/activity.svg"
         }
       ]
@@ -34,18 +34,24 @@
         {
           "type": "webview",
           "id": "agKernelMonitor.sidebar",
-          "name": "AG Context Monitor"
+          "name": ""
         }
       ]
     },
     "commands": [
       {
         "command": "agKernelMonitor.refresh",
-        "title": "AG Context Monitor: Refresh"
+        "title": "Refresh Monitor",
+        "icon": "$(refresh)"
       },
       {
         "command": "agKernelMonitor.openSettings",
-        "title": "AG Context Monitor: Open Settings"
+        "title": "Open Settings",
+        "icon": "$(settings-gear)"
+      },
+      {
+        "command": "agKernelMonitor.forceClean",
+        "title": "Clean Heavy Sessions"
       },
       {
         "command": "agKernelMonitor.openOutput",

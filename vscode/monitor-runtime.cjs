@@ -14,7 +14,7 @@ const TITLE_REGEX = /([A-Z][A-Za-z0-9&/()'.,:_-]*(?: [A-Za-z0-9&/()'.,:_-]+){1,1
 const WINDOWS_DRIVE_REGEX = /^([a-zA-Z]):[\\/]/;
 const FILE_URI_REGEX = /file:\/\/(?:\/(?:[a-zA-Z]:|[a-zA-Z]%3A)|wsl\.localhost\/)[^\s"'<>)\]}]+/gi;
 const TIMESTAMP_REGEX = /^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3})/;
-const LOG_CONVERSATION_REGEX = /([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i;
+const LOG_CONVERSATION_REGEX = /conversation(?:_id)?[\s:=\[]+([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i;
 
 function getAntigravityDataDir() {
   return path.join(os.homedir(), ".gemini", "antigravity");
@@ -1709,7 +1709,11 @@ class AgKernelMonitorRuntime {
       conversationIds.add(conversationEntry.id);
       const brain = brainByConversation.get(conversationEntry.id);
       const trajectory = trajectoryByConversation.get(conversationEntry.id);
-      const stateUris = trajectory && trajectory.workspaceUris ? trajectory.workspaceUris : trajectory && trajectory.workspaceUri ? [trajectory.workspaceUri] : [];
+      const stateUris = trajectory && trajectory.workspaceUris ? [...trajectory.workspaceUris] : trajectory && trajectory.workspaceUri ? [trajectory.workspaceUri] : [];
+      const vscdbSessionUri = stateResult.sessionToWorkspace.get(conversationEntry.id);
+      if (vscdbSessionUri && !stateUris.includes(vscdbSessionUri)) {
+        stateUris.unshift(vscdbSessionUri);
+      }
       const brainUris = brain ? brain.workspaceUris : [];
 
       const mapping = findWorkspaceMatch(stateUris, workspaceRegistry, "state_vscdb", 1.0, 0.92)
@@ -1750,6 +1754,7 @@ class AgKernelMonitorRuntime {
         bytesPerToken: monitorConfig.bytesPerToken,
       });
       const health = assessHealth(metrics.estimatedTotalTokens, monitorConfig.bloatLimit);
+      const chatRun = this.liveState.chatRuns.get(conversationEntry.id);
       const latestDelta = this.liveState.latestDeltas.get(conversationEntry.id);
       const workspace = workspaceRegistry.get(mapping.workspaceUri) || Array.from(workspaceRegistry.values()).find((entry) => entry.id === mapping.workspaceId) || workspaceRegistry.get(UNMAPPED_WORKSPACE_URI);
 
@@ -1780,8 +1785,15 @@ class AgKernelMonitorRuntime {
         whyHeavy: explainWhyHeavy(metrics.estimatedPromptTokens, metrics.estimatedArtifactTokens, metrics.estimatedTotalTokens, monitorConfig.bloatLimit),
         health: health.status,
         healthTone: health.tone,
-        deltaEstimatedTokens: latestDelta ? latestDelta.deltaTokens : 0,
-        deltaEstimatedTokensFormatted: `${latestDelta && latestDelta.deltaTokens < 0 ? "-" : "+"}${formatTokens(Math.abs(latestDelta ? latestDelta.deltaTokens : 0))}`,
+        deltaEstimatedTokens: chatRun ? chatRun.currentRunDeltaTokens : (latestDelta ? latestDelta.deltaTokens : 0),
+        deltaEstimatedTokensFormatted: `+${formatTokens(Math.abs(chatRun ? chatRun.currentRunDeltaTokens : (latestDelta ? latestDelta.deltaTokens : 0)))}`,
+        historicalRuns: chatRun ? chatRun.recentRuns.map(r => ({
+           messageCount: r.messageCount,
+           deltaTokensFormatted: `+${formatTokens(r.deltaTokens)}`,
+           fromTokensFormatted: formatTokens(r.fromTokens),
+           toTokensFormatted: formatTokens(r.toTokens),
+           completedAtRelative: relativeTime(r.completedAt)
+        })) : [],
         isActive: logSnapshot.activeConversationId === conversationEntry.id,
       });
     }
