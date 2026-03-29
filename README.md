@@ -1,43 +1,50 @@
-# AG-Kernel-Monitor
+# AG Kernel Monitor
 
-AG Kernel Monitor helps you see what Antigravity is doing to your conversations: current session growth, estimated context size, workspace mapping, unmapped sessions, brain/cache bloat, and cleanup targets.
+AG Kernel Monitor is a monitor for Google Antigravity conversations.
 
-The primary product direction is the VS Code sidebar extension. The CLI remains available for direct inspection and automation.
+Summary: track estimated token growth, current context usage, and cache bloat across Antigravity sessions with a VS Code sidebar or CLI.
+
+It helps you answer four practical questions:
+
+- How much context has this session built up so far?
+- How much did the latest turn add?
+- Which conversations are getting too large?
+- Which cache or brain artifacts are worth cleaning up?
+
+The primary experience is the VS Code sidebar extension. A CLI is also included for direct inspection and automation.
+
+## What It Shows
+
+- Current conversation status and estimated total context
+- Live session growth while Antigravity is running
+- Workspace-level conversation summaries
+- Brain and cache cleanup targets
+- Unmapped and orphaned artifacts that need investigation
 
 ## Install
 
-### 1. Preferred: VS Code / Open VSX extension
+### Preferred: Open VSX extension
 
-Use the Open VSX extension once it is published.
+Install `AG Kernel Monitor` from Open VSX inside VS Code or compatible editors.
 
-The sidebar is designed to show:
+After install:
 
-- current conversation
-- current editor workspace details
-- global brain/cache and cleanup view
-- settings and runtime status
+1. Open the `AG Monitor` sidebar
+2. Keep the sidebar visible while using Antigravity if you want live updates
+3. Use VS Code settings if you want to change refresh behavior or config path
 
-### 2. If Open VSX is not available: manual extension install
+### Manual VSIX install
 
-Install the extension from a `.vsix` package through VS Code:
+If you already have a `.vsix`:
 
-1. Open Extensions in VS Code.
-2. Open the `...` menu.
-3. Choose `Install from VSIX...`.
-4. Select the downloaded AG Kernel Monitor `.vsix`.
+1. Open Extensions
+2. Open the `...` menu
+3. Choose `Install from VSIX...`
+4. Select the AG Kernel Monitor package
 
-For local development from this repo:
+### CLI fallback
 
-```bash
-bun install
-bun run package:vsix
-```
-
-That produces a `.vsix` with the bundled runtime for the machine you package on. Then run the extension host from the repo with the launch config in `.vscode/launch.json`.
-
-### 3. CLI fallback
-
-If you do not want the extension yet, use the CLI directly:
+If you want the terminal workflow:
 
 ```bash
 bun install
@@ -47,78 +54,28 @@ bun run dev scan
 Useful commands:
 
 ```bash
-# Summary plus current or most recent conversation
+# Scan all conversations and show the current snapshot plus workspace totals
 bun run dev scan
 
-# Current or most recent conversation only
+# Show only the current or most recent conversation
 bun run dev scan --current
 
-# Drill into a workspace
+# Drill into one workspace
 bun run dev scan --workspace "My-Project"
 
-# Drill into a single conversation
+# Drill into one conversation by session id
 bun run dev scan --conversation <uuid>
 
-# Health / cleanup report
+# Live monitor conversation growth and runtime signals in the terminal
+bun run dev scan --watch
+
+# Show cleanup targets, unmapped conversations, and orphan artifacts
 bun run dev report
 ```
 
-## Setup Effort
-
-Current state:
-
-- The published extension should ship a bundled runtime so the user does not need Bun.
-- Local development still uses Bun to build the runtime artifacts.
-- The CLI obviously requires Bun as well.
-
-Can Bun be removed technically?
-
-Yes, but not in the current build. The clean way to remove that requirement is to ship a platform-specific runtime with the extension, for example:
-
-- a precompiled Windows binary
-- a precompiled macOS binary
-- a precompiled Linux binary
-
-That would let the extension run without asking the user to install Bun manually. The current codebase is already structured so that move is practical later.
-
-Current packaging direction:
-
-- `vscode/runtime/bin/win32-x64/agk-monitor.exe`
-- `vscode/runtime/bin/win32-arm64/agk-monitor.exe`
-- `vscode/runtime/bin/darwin-x64/agk-monitor`
-- `vscode/runtime/bin/darwin-arm64/agk-monitor`
-- `vscode/runtime/bin/linux-x64/agk-monitor`
-- `vscode/runtime/bin/linux-arm64/agk-monitor`
-
-These binaries are generated during packaging and release. They should not be committed to Git. Local packaging includes the runtime for the current platform, while CI still builds the full target matrix.
-
-## Compatibility
-
-The code is designed for:
-
-- Windows
-- macOS
-- Linux
-
-Why macOS should work:
-
-- Antigravity data paths are resolved per platform in `src/paths.ts`
-- workspace URIs are normalized instead of assuming Windows-only paths
-- the sidebar extension reads the same cross-platform JSON model as the CLI
-
-Current honesty:
-
-- Windows is the primary validation environment right now
-- macOS support is designed in, but not yet validated on a real Mac machine
-
-Expected macOS locations in the current implementation:
-
-- Antigravity data: `~/.gemini/antigravity/`
-- Electron user data: `~/Library/Application Support/Antigravity/User/`
-
 ## Configuration
 
-Create `.ag-kernel.json` in the project root or home directory:
+Create `.ag-kernel.json` in your project root or home directory:
 
 ```json
 {
@@ -129,26 +86,93 @@ Create `.ag-kernel.json` in the project root or home directory:
 }
 ```
 
-You can also pass a config explicitly:
+You can also pass a config explicitly in the CLI:
 
 ```bash
 bun run dev scan --config .ag-kernel.json
 ```
 
-Available keys:
+## How AG Kernel Monitor Calculates Things
 
-| Key | Default | Description |
-|---|---|---|
-| `bloatLimit` | `1000000` | Estimated token threshold for bloat warnings |
-| `bytesPerToken` | `3.5` | Estimated bytes per token for `.pb` size conversion |
-| `dbPath` | `~/.ag-kernel/monitor.db` | SQLite database location |
-| `logLevel` | `info` | Logging verbosity: `debug`, `info`, `warn`, `error` |
+### Token and context estimates
+
+AG Kernel Monitor uses estimated values unless Antigravity runtime logs expose a direct signal.
+
+- Prompt/history estimate:
+  - prefers direct message count when available
+  - otherwise estimates from conversation `.pb` size using `bytesPerToken`
+- Artifact estimate:
+  - derived from brain folder size
+  - adjusted with resolved brain versions
+- Estimated total context:
+  - prompt/history estimate + artifact estimate
+
+### Live growth
+
+While monitoring is active:
+
+- `.pb` file growth shows how the conversation data is changing
+- runtime log signals can attach direct message counts to the same session
+- the sidebar and watch mode show the latest added amount and current total context
+
+### Cache and cleanup management
+
+AG Kernel Monitor scans:
+
+- conversation `.pb` files
+- brain folders
+- annotation files
+- Antigravity runtime logs
+- Antigravity state metadata
+
+It uses those sources to highlight:
+
+- oversized conversations
+- unmapped conversations
+- orphan brain folders
+- orphan annotation files
+
+## Compatibility
+
+- Windows
+- macOS
+- Linux
+
+The current primary validation environment is Windows.
 
 ## Notes
 
-- Token and context numbers are still estimated unless they come directly from runtime signals.
-- Current conversation detection uses live log signals first and falls back to the most recent session when logs do not confirm a live active one.
-- Remaining unmapped conversations are now diagnosed in the report instead of being left unexplained.
+- Live monitoring runs only while the sidebar is visible
+- If live activity cannot be confirmed from logs, the monitor falls back to the most recent conversation
+- Historical per-chat breakdown is not reconstructed retroactively; live per-chat tracking starts when monitoring observes the session
+
+## Reporting Issues
+
+Please open an issue in this repository with:
+
+- your OS
+- editor version
+- extension version
+- whether you used the sidebar or CLI
+- screenshots or terminal output if available
+- a redacted sample of unexpected logs if the bug is live-monitor related
+
+## Contributing
+
+Contributions are welcome.
+
+If you want to help:
+
+- open an issue first for bugs, UX problems, or feature proposals
+- keep changes focused and easy to review
+- include clear reproduction steps for fixes
+- include tests where practical for parser, watcher, or mapping changes
+
+## Scope
+
+AG Kernel Monitor is currently designed for Antigravity only.
+
+The architecture can be extended later to other local AI coding tools such as Claude-based workflows, but that is not the current product scope.
 
 ## License
 
