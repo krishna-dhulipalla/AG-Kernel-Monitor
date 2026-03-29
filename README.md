@@ -1,17 +1,24 @@
-# AG Kernel Monitor
+# Antigravity Context Monitor
 
-AG Kernel Monitor is a monitor for Google Antigravity conversations.
+**Antigravity Context Monitor** is a precise telemetry tool for monitoring token consumption, context window usage, and cache bloat during Google Antigravity conversations.
 
-Summary: track estimated token growth, current context usage, and cache bloat across Antigravity sessions with a VS Code sidebar or CLI.
+<div align="center">
+  <!-- TODO: Replace with an actual screenshot of the extension sidebar -->
+  <img src="media/screenshot-placeholder.png" alt="Antigravity Context Monitor Sidebar" width="650" />
+</div>
+
+## Overview
+
+AI chats can quickly accumulate massive context windows, leading to slower responses and potential performance degradation. This tool provides real-time visibility into your session's health straight from your editor's sidebar or terminal.
 
 It helps you answer four practical questions:
 
-- How much context has this session built up so far?
-- How much did the latest turn add?
-- Which conversations are getting too large?
-- Which cache or brain artifacts are worth cleaning up?
+- **How much context has this session built up so far?**
+- **How much did the latest turn add to the conversation?**
+- **Which conversations are getting too large and need pruning?**
+- **Which cache or brain artifacts are orphaned and worth cleaning up?**
 
-The primary experience is the VS Code sidebar extension. A CLI is also included for direct inspection and automation.
+The primary experience is the **VS Code sidebar extension**. A fully-featured **CLI** is also included for direct inspection and automation.
 
 ## What It Shows
 
@@ -25,11 +32,11 @@ The primary experience is the VS Code sidebar extension. A CLI is also included 
 
 ### Preferred: Open VSX extension
 
-Install `AG Kernel Monitor` from Open VSX inside VS Code or compatible editors.
+Install `Antigravity Context Monitor` from Open VSX inside VS Code or compatible editors.
 
 After install:
 
-1. Open the `AG Monitor` sidebar
+1. Open the `AG Context` sidebar
 2. Keep the sidebar visible while using Antigravity if you want live updates
 3. Use VS Code settings if you want to change refresh behavior or config path
 
@@ -40,7 +47,7 @@ If you already have a `.vsix`:
 1. Open Extensions
 2. Open the `...` menu
 3. Choose `Install from VSIX...`
-4. Select the AG Kernel Monitor package
+4. Select the Antigravity Context Monitor package
 
 ### CLI fallback
 
