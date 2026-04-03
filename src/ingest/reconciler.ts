@@ -245,7 +245,7 @@ export async function reconcile(db: MonitorDB, config: AgKernelConfig): Promise<
     workspaceStorageEntries,
   );
 
-  const stateResult = parseStateVscdb();
+  const stateResult = await parseStateVscdb();
   const trajectoryByConversation = indexTrajectories(stateResult?.trajectories ?? []);
   const logSignals = scanLatestLogFile();
 

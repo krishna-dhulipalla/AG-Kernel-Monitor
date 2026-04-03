@@ -264,19 +264,19 @@ function explainWhyHeavy(
     return "Estimated total is over the limit and artifact context is a material share of it.";
   }
   if (ratio >= 1) {
-    return "Estimated conversation history is already over the configured context limit.";
+    return "Estimated conversation history is already over the configured warning limit.";
   }
   if (artifactShare >= 0.45) {
     return "Artifact context is a large share of the estimated total.";
   }
   if (ratio >= 0.8) {
-    return "Estimated conversation history is close to the configured context limit.";
+    return "Estimated conversation history is close to the configured warning limit.";
   }
   return "Estimated conversation history is the dominant source of context growth.";
 }
 
 function estimateConversationMetrics(input) {
-  const AVG_TOKENS_PER_MESSAGE = 1500;
+  const AVG_TOKENS_PER_MESSAGE = 500;
   const BRAIN_BYTES_PER_TOKEN = 4.0;
   const TOKENS_PER_RESOLVED_VERSION = 500;
 
@@ -324,7 +324,7 @@ function safeJsonParse(text) {
 
 function loadMonitorConfig(configPath) {
   const defaults = {
-    bloatLimit: 3_000_000,
+    bloatLimit: 1_000_000,
     bytesPerToken: 3.5,
   };
 
@@ -1642,6 +1642,24 @@ class AgKernelMonitorRuntime {
       ? conversationIndex.get(snapshot.currentConversation.conversation.id) ||
         snapshot.currentConversation.conversation
       : null;
+    const currentConversationMessageCount =
+      currentConversationView &&
+      currentConversationView.messageCount !== null &&
+      currentConversationView.messageCount !== undefined
+        ? currentConversationView.messageCount
+        : currentConversationState &&
+            currentConversationState.lastMessageCount !== null &&
+            currentConversationState.lastMessageCount !== undefined
+          ? currentConversationState.lastMessageCount
+          : null;
+    const currentConversationMessageCountSource =
+      currentConversationView &&
+      currentConversationView.messageCount !== null &&
+      currentConversationView.messageCount !== undefined
+        ? currentConversationView.messageCountSource || null
+        : currentConversationMessageCount !== null
+          ? "live"
+          : null;
     const observedTurnCount = currentConversationState
       ? currentConversationState.observedCompletedTurns
       : 0;
@@ -1664,11 +1682,11 @@ class AgKernelMonitorRuntime {
       currentConversationView &&
       currentConversationState &&
       hasActiveObservedTurn &&
-      currentConversationView.messageCount !== null &&
+      currentConversationMessageCount !== null &&
       currentConversationState.currentRunStartMessageCount !== null
         ? Math.max(
             0,
-            currentConversationView.messageCount -
+            currentConversationMessageCount -
               currentConversationState.currentRunStartMessageCount,
           )
         : null;
@@ -1685,6 +1703,8 @@ class AgKernelMonitorRuntime {
     const currentConversation = snapshot.currentConversation.conversation
       ? {
           ...currentConversationView,
+          messageCount: currentConversationMessageCount,
+          messageCountSource: currentConversationMessageCountSource,
           resolutionState: snapshot.currentConversation.resolutionState,
           resolutionNote: snapshot.currentConversation.resolutionNote,
           latestDelta:
@@ -2439,6 +2459,8 @@ class AgKernelMonitorRuntime {
         mappedConversations: mappedStats.conversationsMapped,
         unmappedConversations: mappedStats.conversationsUnmapped,
         orphanBrainFolders: mappedStats.orphanBrainFolders,
+        modelCredits: stateResult.modelCredits,
+        warningLimit: monitorConfig.bloatLimit,
         currentWorkspaceName: currentConversation.conversation
           ? currentConversation.conversation.workspaceName
           : "None",

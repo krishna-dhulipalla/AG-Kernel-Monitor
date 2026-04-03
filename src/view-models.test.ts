@@ -29,11 +29,11 @@ describe("view-models", () => {
     }
   });
 
-  it("builds enriched conversation and workspace models", () => {
+  it("builds enriched conversation and workspace models", async () => {
     const dir = mkdtempSync(join(tmpdir(), "agk-db-"));
     tempDirs.push(dir);
 
-    const db = new MonitorDB(join(dir, "monitor.db"));
+    const db = await MonitorDB.create(join(dir, "monitor.db"));
     db.upsertWorkspace({
       id: "ws-1",
       uri: "file:///c:/Users/example/Desktop/Hiring-Trend-Tracker",
@@ -103,11 +103,11 @@ describe("view-models", () => {
     db.close();
   });
 
-  it("disambiguates duplicate workspace names with display hints", () => {
+  it("disambiguates duplicate workspace names with display hints", async () => {
     const dir = mkdtempSync(join(tmpdir(), "agk-db-"));
     tempDirs.push(dir);
 
-    const db = new MonitorDB(join(dir, "monitor.db"));
+    const db = await MonitorDB.create(join(dir, "monitor.db"));
     db.upsertWorkspace({
       id: "ws-a",
       uri: "file:///c:/Users/example/Desktop/blocker_app",

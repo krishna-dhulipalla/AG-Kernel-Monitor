@@ -8,8 +8,11 @@
  * assuming one fixed serialization format.
  */
 
+import initSqlJs from "sql.js";
 import { Database } from "bun:sqlite";
-import { existsSync } from "fs";
+import { existsSync, copyFileSync, readFileSync } from "fs";
+import { join } from "path";
+import { tmpdir } from "os";
 import { getGlobalStateDbPath } from "../paths";
 import { findFileUrisInText, normalizeWorkspaceUri } from "../uri-utils";
 
@@ -56,7 +59,7 @@ const UUID_REGEX = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}
 const BASE64_REGEX = /(?:[A-Za-z0-9+/]{24,}={0,2})/g;
 const TITLE_REGEX = /([A-Z][A-Za-z0-9&/()'.,:_-]*(?: [A-Za-z0-9&/()'.,:_-]+){1,12})/;
 
-function readItemTableRawValue(db: Database, key: string): string | null {
+function readItemTableRawValue(db: any, key: string): string | null {
   try {
     const row = db.query("SELECT value FROM ItemTable WHERE key = ?1").get(key) as { value: Buffer | string | Uint8Array } | null;
     if (!row) return null;
@@ -371,7 +374,7 @@ export function listStateKeys(customPath?: string): string[] {
   }
 }
 
-export function parseStateVscdb(customPath?: string): StateVscdbResult | null {
+export async function parseStateVscdb(customPath?: string): Promise<StateVscdbResult | null> {
   const dbPath = customPath || getGlobalStateDbPath();
 
   if (!existsSync(dbPath)) {
@@ -379,9 +382,19 @@ export function parseStateVscdb(customPath?: string): StateVscdbResult | null {
     return null;
   }
 
+  const tempPath = join(tmpdir(), "state_vscdb_tmp_" + Date.now());
+  try {
+    copyFileSync(dbPath, tempPath);
+  } catch (err) {
+    console.error("❌ Failed to copy state.vscdb:", err);
+    return null;
+  }
+
   let db: Database;
   try {
-    db = new Database(dbPath, { readonly: true });
+    const SQL = await initSqlJs();
+    const filebuffer = readFileSync(tempPath);
+    db = new SQL.Database(filebuffer);
   } catch (err) {
     console.error("❌ Failed to open state.vscdb:", err);
     return null;

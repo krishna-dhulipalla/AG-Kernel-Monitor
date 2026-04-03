@@ -14,7 +14,7 @@ import { join, resolve } from "path";
 import { getDefaultDbPath } from "./paths";
 
 export interface AgKernelConfig {
-  /** Token count threshold for bloat warning (default: 1000000) */
+  /** Estimated token warning threshold for session/workspace risk (default: 1000000) */
   bloatLimit: number;
   /** Estimated bytes per token for .pb file size -> token conversion (default: 3.5) */
   bytesPerToken: number;

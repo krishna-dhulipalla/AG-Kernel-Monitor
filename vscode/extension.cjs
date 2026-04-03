@@ -9,21 +9,36 @@ function activate(context) {
 
   context.subscriptions.push(output);
   context.subscriptions.push(
-    vscode.window.registerWebviewViewProvider("agKernelMonitor.sidebar", provider, {
-      webviewOptions: { retainContextWhenHidden: true },
-    }),
-    vscode.commands.registerCommand("agKernelMonitor.refresh", () => provider.refresh(true)),
+    vscode.window.registerWebviewViewProvider(
+      "agKernelMonitor.sidebar",
+      provider,
+      {
+        webviewOptions: { retainContextWhenHidden: true },
+      },
+    ),
+    vscode.commands.registerCommand("agKernelMonitor.refresh", () =>
+      provider.refresh(true),
+    ),
     vscode.commands.registerCommand("agKernelMonitor.openSettings", () => {
-      void vscode.commands.executeCommand("workbench.action.openSettings", "agKernelMonitor");
+      void vscode.commands.executeCommand(
+        "workbench.action.openSettings",
+        "agKernelMonitor",
+      );
     }),
-    vscode.commands.registerCommand("agKernelMonitor.openOutput", () => output.show(true)),
+    vscode.commands.registerCommand("agKernelMonitor.openOutput", () =>
+      output.show(true),
+    ),
     vscode.workspace.onDidChangeConfiguration((event) => {
       if (event.affectsConfiguration("agKernelMonitor")) {
         provider.onConfigurationChanged();
       }
     }),
-    vscode.workspace.onDidChangeWorkspaceFolders(() => provider.onWorkspaceContextChanged()),
-    vscode.window.onDidChangeActiveTextEditor(() => provider.onWorkspaceContextChanged()),
+    vscode.workspace.onDidChangeWorkspaceFolders(() =>
+      provider.onWorkspaceContextChanged(),
+    ),
+    vscode.window.onDidChangeActiveTextEditor(() =>
+      provider.onWorkspaceContextChanged(),
+    ),
   );
 }
 
@@ -61,7 +76,9 @@ class AgKernelSidebarProvider {
         this.sectionState[message.sectionId] = Boolean(message.open);
       }
       if (message?.type === "clean") {
-        vscode.window.showInformationMessage("Cleanup functionality is scheduled for Phase 2 Implementation.");
+        vscode.window.showInformationMessage(
+          "Cleanup functionality is scheduled for Phase 2 Implementation.",
+        );
         return;
       }
     });
@@ -123,13 +140,17 @@ class AgKernelSidebarProvider {
         },
         onError: (error) => {
           this.lastError = error;
-          this.output.appendLine(`[error] ${String(error?.stack || error?.message || error)}`);
+          this.output.appendLine(
+            `[error] ${String(error?.stack || error?.message || error)}`,
+          );
           this.render();
         },
       });
     } catch (error) {
       this.lastError = error;
-      this.output.appendLine(`[error] ${String(error?.stack || error?.message || error)}`);
+      this.output.appendLine(
+        `[error] ${String(error?.stack || error?.message || error)}`,
+      );
       this.render();
     }
   }
@@ -142,7 +163,9 @@ class AgKernelSidebarProvider {
   async refresh(forceRevealErrors) {
     if (!this.view) return;
     this.runtime.preferredWorkspacePath = getPreferredWorkspacePath();
-    this.runtime.configPath = resolveConfiguredPath(readSettings().cliConfigPath);
+    this.runtime.configPath = resolveConfiguredPath(
+      readSettings().cliConfigPath,
+    );
     try {
       await this.runtime.refresh();
     } catch (error) {
@@ -171,7 +194,10 @@ function readSettings() {
     bunPath: config.get("bunPath", "bun"),
     cliConfigPath: config.get("cliConfigPath", ""),
     autoRefreshSeconds: config.get("autoRefreshSeconds", 20),
-    preferActiveEditorWorkspace: config.get("preferActiveEditorWorkspace", true),
+    preferActiveEditorWorkspace: config.get(
+      "preferActiveEditorWorkspace",
+      true,
+    ),
   };
 }
 
@@ -180,7 +206,9 @@ function getPreferredWorkspacePath() {
   if (settings.preferActiveEditorWorkspace) {
     const activeEditor = vscode.window.activeTextEditor;
     if (activeEditor) {
-      const folder = vscode.workspace.getWorkspaceFolder(activeEditor.document.uri);
+      const folder = vscode.workspace.getWorkspaceFolder(
+        activeEditor.document.uri,
+      );
       if (folder) {
         return folder.uri.fsPath;
       }
@@ -213,7 +241,7 @@ const SVGS = {
   terminal: `<svg viewBox="0 0 16 16" width="16" height="16" fill="currentColor"><path fill-rule="evenodd" d="M2 3a1 1 0 011-1h10a1 1 0 011 1v10a1 1 0 01-1 1H3a1 1 0 01-1-1V3zm1 0v10h10V3H3zm2.5 3a.5.5 0 00-.5.5v1a.5.5 0 00.5.5h2a.5.5 0 00.5-.5v-1a.5.5 0 00-.5-.5h-2z"/></svg>`,
   folder: `<svg viewBox="0 0 16 16" width="16" height="16" fill="currentColor"><path d="M14.5 4H8.7l-1-1.5H1.5v11h13V4zm-12.3 8V3.5h5.8l1 1.5h5v7h-11.8z"/></svg>`,
   refresh: `<svg viewBox="0 0 16 16" width="16" height="16" fill="currentColor"><path fill-rule="evenodd" d="M4.681 3H2V2h3.5l.5.5V6H5V4a5 5 0 104.5 9.079l.5.866A6 6 0 114.681 3z"/></svg>`,
-  clean: `<svg viewBox="0 0 16 16" width="16" height="16" fill="currentColor"><path d="M5.5 5.5A.5.5 0 016 6v6a.5.5 0 01-1 0V6a.5.5 0 01.5-.5zm2.5 0a.5.5 0 01.5.5v6a.5.5 0 01-1 0V6a.5.5 0 01.5-.5zm3 .5a.5.5 0 00-1 0v6a.5.5 0 001 0V6z"/><path fill-rule="evenodd" d="M14.5 3a1 1 0 01-1 1H13v9a2 2 0 01-2 2H5a2 2 0 01-2-2V4h-.5a1 1 0 01-1-1V2a1 1 0 011-1H6a1 1 0 011-1h2a1 1 0 011 1h3.5a1 1 0 011 1v1zM4.118 4L4 4.059V13a1 1 0 001 1h6a1 1 0 001-1V4.059L11.882 4H4.118zM2.5 3V2h11v1h-11z"/></svg>`
+  clean: `<svg viewBox="0 0 16 16" width="16" height="16" fill="currentColor"><path d="M5.5 5.5A.5.5 0 016 6v6a.5.5 0 01-1 0V6a.5.5 0 01.5-.5zm2.5 0a.5.5 0 01.5.5v6a.5.5 0 01-1 0V6a.5.5 0 01.5-.5zm3 .5a.5.5 0 00-1 0v6a.5.5 0 001 0V6z"/><path fill-rule="evenodd" d="M14.5 3a1 1 0 01-1 1H13v9a2 2 0 01-2 2H5a2 2 0 01-2-2V4h-.5a1 1 0 01-1-1V2a1 1 0 011-1H6a1 1 0 011-1h2a1 1 0 011 1h3.5a1 1 0 011 1v1zM4.118 4L4 4.059V13a1 1 0 001 1h6a1 1 0 001-1V4.059L11.882 4H4.118zM2.5 3V2h11v1h-11z"/></svg>`,
 };
 
 function getHtml(webview, model) {
@@ -273,20 +301,23 @@ function renderOverview(snapshot, current) {
   if (!snapshot) return "";
   const overview = snapshot.overview;
   const tone = toneClass(current?.healthTone || "neutral");
+  const quotaValue = formatQuota(overview.modelCredits);
   return `
     ${renderTreeItem(SVGS.pulse, "State", formatResolutionLabel(overview.resolutionState), "", tone)}
+    ${renderTreeItem(SVGS.info, "Quota Used", quotaValue)}
+    ${renderTreeItem(SVGS.graph, "Warning Limit", formatTokens(overview.warningLimit || 0))}
     ${renderTreeItem(SVGS.graph, "Session Total Tokens", current ? `${current.estimatedTotalTokensFormatted}` : "0")}
-    ${renderTreeItem(SVGS.link, "Mapped workspaces", `${overview.mappedConversations}/${overview.totalConversations}`)}
+    ${renderTreeItem(SVGS.link, "Mapped sessions", `${overview.mappedConversations}/${overview.totalConversations}`)}
     ${renderTreeItem(SVGS.info, "Unmapped sessions", String(overview.unmappedConversations))}
   `;
 }
 
 function renderCurrentConversation(snapshot, current) {
-  if (!snapshot || !current) return '<div class="empty">No current conversation could be resolved.</div>';
+  if (!snapshot || !current)
+    return '<div class="empty">No current conversation could be resolved.</div>';
   const label = current.title || "Untitled";
   return `
     ${renderTreeItem(SVGS.folder, label, "", current.healthTone === "neutral" ? "" : current.health, current.healthTone)}
-    ${renderTreeItem("", "Session Total Tokens", `${current.estimatedTotalTokensFormatted}`)}
     ${renderTreeItem("", "Tokens Added This Turn", current.deltaEstimatedTokensFormatted || "+0")}
     ${renderTreeItem("", "Last Observed Turn", current.lastObservedTurnTokensFormatted || "none")}
     ${renderTreeItem("", "Tokens Added In Last 5 Turns", current.lastFiveTurnsTokensFormatted || "+0")}
@@ -305,18 +336,32 @@ function renderRecentChatRuns(current) {
   if (runs.length === 0) return "";
   return `
     <div class="tree-subitems-header empty" style="margin-top:4px;">Recent Observed Turns:</div>
-    ${runs.slice(0, 5).map(run => renderTreeItem("", `Turn ${run.chatIndex} | ${run.directMessages === null || run.directMessages === undefined ? "? msgs" : `+${run.directMessages} msgs`}`, `${run.deltaTokensFormatted}`)).join("")}
+    ${runs
+      .slice(0, 5)
+      .map((run) =>
+        renderTreeItem(
+          "",
+          `Turn ${run.chatIndex} | ${run.directMessages === null || run.directMessages === undefined ? "? msgs" : `+${run.directMessages} msgs`}`,
+          `${run.deltaTokensFormatted}`,
+        ),
+      )
+      .join("")}
   `;
 }
 
 function renderLiveActivity(snapshot) {
   const feed = snapshot?.liveFeed || [];
-  if (feed.length === 0) return `<div class="empty">No live activity observed.</div>`;
-  return feed.map(event => `
+  if (feed.length === 0)
+    return `<div class="empty">No live activity observed.</div>`;
+  return feed
+    .map(
+      (event) => `
     <div class="log-line">
       ${escapeHtml(formatLiveEventLine(event))}
     </div>
-  `).join("");
+  `,
+    )
+    .join("");
 }
 
 function renderWorkspace(snapshot) {
@@ -333,8 +378,12 @@ function renderWorkspace(snapshot) {
   `;
   if (workspace.conversations && workspace.conversations.length > 0) {
     html += `<div class="tree-subitems-header empty" style="margin-top:4px;">Top Sessions By Total Tokens:</div>`;
-    workspace.conversations.slice(0, 5).forEach(c => {
-      html += renderTreeItem("", c.title || "Untitled", `${c.estimatedTotalTokensFormatted}`);
+    workspace.conversations.slice(0, 5).forEach((c) => {
+      html += renderTreeItem(
+        "",
+        c.title || "Untitled",
+        `${c.estimatedTotalTokensFormatted}`,
+      );
     });
   }
   return html;
@@ -344,20 +393,39 @@ function renderCleanup(snapshot) {
   if (!snapshot) return `<div class="empty">No cleanup data available.</div>`;
   const cleanup = snapshot.cleanupSummary;
   let html = "";
-  if (cleanup.unmappedConversations && cleanup.unmappedConversations.length > 0) {
+  if (
+    cleanup.unmappedConversations &&
+    cleanup.unmappedConversations.length > 0
+  ) {
     html += `<div class="tree-subitems-header empty" style="margin-top:4px;">Unmapped Sessions:</div>`;
-    cleanup.unmappedConversations.slice(0, 4).forEach(c => {
-      html += renderTreeItem(SVGS.info, c.title || "Untitled", c.estimatedTotalTokensFormatted, "", "", null, `
+    cleanup.unmappedConversations.slice(0, 4).forEach((c) => {
+      html += renderTreeItem(
+        SVGS.info,
+        c.title || "Untitled",
+        c.estimatedTotalTokensFormatted,
+        "",
+        "",
+        null,
+        `
         <button class="action-btn" title="Refresh mapping" data-action="refresh">${SVGS.refresh}</button>
-      `);
+      `,
+      );
     });
   }
   if (cleanup.orphanBrainFolders && cleanup.orphanBrainFolders.length > 0) {
     html += `<div class="tree-subitems-header empty" style="margin-top:4px;">Orphan Brain Folders (${cleanup.orphanBrainFolders.length}):</div>`;
-    cleanup.orphanBrainFolders.forEach(folder => {
-      html += renderTreeItem(SVGS.folder, folder, "", "", "", null, `
+    cleanup.orphanBrainFolders.forEach((folder) => {
+      html += renderTreeItem(
+        SVGS.folder,
+        folder,
+        "",
+        "",
+        "",
+        null,
+        `
         <button class="action-btn" title="Clean" data-action="clean">${SVGS.clean}</button>
-      `);
+      `,
+      );
     });
   }
   if (!html) html = `<div class="empty">Workspace is clean.</div>`;
@@ -387,7 +455,15 @@ function toneClass(tone) {
   return "tone-neutral";
 }
 
-function renderTreeItem(iconSvg, label, value = "", badgeText = "", badgeTone = "", subItems = null, actionsHtml = "") {
+function renderTreeItem(
+  iconSvg,
+  label,
+  value = "",
+  badgeText = "",
+  badgeTone = "",
+  subItems = null,
+  actionsHtml = "",
+) {
   return `
     <div class="tree-item-wrapper">
       <div class="tree-item">
@@ -402,6 +478,35 @@ function renderTreeItem(iconSvg, label, value = "", badgeText = "", badgeTone = 
       ${subItems ? `<div class="tree-subitems">${subItems}</div>` : ""}
     </div>
   `;
+}
+
+function formatTokens(tokens) {
+  const value =
+    typeof tokens === "number" && Number.isFinite(tokens) ? tokens : 0;
+  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
+  if (value >= 1_000) return `${Math.round(value / 1_000)}K`;
+  return String(value);
+}
+
+function formatQuota(modelCredits) {
+  if (!modelCredits) return "unavailable in local state";
+  const used =
+    typeof modelCredits.used === "number" && Number.isFinite(modelCredits.used)
+      ? modelCredits.used
+      : 0;
+  const total =
+    typeof modelCredits.total === "number" &&
+    Number.isFinite(modelCredits.total)
+      ? modelCredits.total
+      : 0;
+  if (total > 0) {
+    const ratio = Math.max(0, Math.min(1, used / total));
+    return `${used}/${total} (${Math.round(ratio * 100)}%)`;
+  }
+  if (used > 0) {
+    return `${used} used`;
+  }
+  return "unavailable in local state";
 }
 
 function getStyles() {
@@ -563,9 +668,10 @@ function formatLiveEventLine(event) {
   const session = `${event.conversationId.slice(0, 12)}...`;
 
   if (event.source === "log" && event.messageCount !== undefined) {
-    const deltaMessages = event.deltaMessages !== null && event.deltaMessages !== undefined
-      ? ` (${event.deltaMessages >= 0 ? "+" : ""}${event.deltaMessages} since last)`
-      : "";
+    const deltaMessages =
+      event.deltaMessages !== null && event.deltaMessages !== undefined
+        ? ` (${event.deltaMessages >= 0 ? "+" : ""}${event.deltaMessages} since last)`
+        : "";
     return `[${time}] [LIVE] ${session} now at ${event.messageCount} direct messages${deltaMessages} -> ${event.totalTokensFormatted} estimated tokens (${event.contextRatioFormatted} of limit)`;
   }
 
@@ -582,7 +688,8 @@ function escapeHtml(value) {
 }
 
 function createNonce() {
-  const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+  const chars =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
   let nonce = "";
   for (let index = 0; index < 32; index += 1) {
     nonce += chars.charAt(Math.floor(Math.random() * chars.length));

@@ -43,7 +43,7 @@ program
   .option("--json", "Output raw JSON instead of formatted tables");
 
 const config = loadConfig(getConfigPathFromArgv(process.argv));
-const db = new MonitorDB(config.dbPath);
+const db = await MonitorDB.create(config.dbPath);
 
 registerScanCommand(program, db, config);
 registerReportCommand(program, db, config);
@@ -51,10 +51,12 @@ registerNukeCommand(program, db, config);
 registerServeCommand(program, db, config);
 
 process.on("exit", () => {
+  db.save();
   db.close();
 });
 
 process.on("SIGINT", () => {
+  db.save();
   db.close();
   process.exit(0);
 });

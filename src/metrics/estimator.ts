@@ -21,7 +21,7 @@ export interface EstimatedConversationMetrics {
   promptEstimateSource: "message_count" | "pb_size";
 }
 
-const AVG_TOKENS_PER_MESSAGE = 1500;
+const AVG_TOKENS_PER_MESSAGE = 500;
 const BRAIN_BYTES_PER_TOKEN = 4.0;
 const TOKENS_PER_RESOLVED_VERSION = 500;
 
@@ -91,7 +91,7 @@ export function explainWhyHeavy(
   }
 
   if (ratio >= 1) {
-    return "Estimated conversation history is already over the configured context limit.";
+    return "Estimated conversation history is already over the configured warning limit.";
   }
 
   if (artifactShare >= 0.45) {
@@ -99,7 +99,7 @@ export function explainWhyHeavy(
   }
 
   if (ratio >= 0.8) {
-    return "Estimated conversation history is close to the configured context limit.";
+    return "Estimated conversation history is close to the configured warning limit.";
   }
 
   return "Estimated conversation history is the dominant source of context growth.";

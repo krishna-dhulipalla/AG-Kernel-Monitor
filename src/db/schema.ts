@@ -1,5 +1,5 @@
 /**
- * SQLite database schema and access layer using bun:sqlite.
+ * SQLite database schema and access layer using sql.js.
  *
  * Tables:
  *   - workspaces:     workspace registry from Antigravity metadata
@@ -7,8 +7,8 @@
  *   - snapshots:      historical trend tracking per conversation
  */
 
-import { Database } from "bun:sqlite";
-import { existsSync, mkdirSync } from "fs";
+import initSqlJs, { Database, SqlJsStatic } from "sql.js";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { dirname } from "path";
 
 export interface Workspace {
@@ -114,17 +114,61 @@ const SCHEMA_SQL = `
 
 export class MonitorDB {
   private db: Database;
+  private dbPath: string;
 
-  constructor(dbPath: string) {
+  private constructor(dbPath: string, db: Database) {
+    this.dbPath = dbPath;
+    this.db = db;
+    this.db.exec("PRAGMA foreign_keys = ON");
+    this.init();
+  }
+
+  static async create(dbPath: string): Promise<MonitorDB> {
     const dir = dirname(dbPath);
     if (!existsSync(dir)) {
       mkdirSync(dir, { recursive: true });
     }
 
-    this.db = new Database(dbPath);
-    this.db.exec("PRAGMA journal_mode = WAL");
-    this.db.exec("PRAGMA foreign_keys = ON");
-    this.init();
+    const SQL = await initSqlJs();
+    let db;
+    if (existsSync(dbPath)) {
+      const filebuffer = readFileSync(dbPath);
+      db = new SQL.Database(filebuffer);
+    } else {
+      db = new SQL.Database();
+    }
+    return new MonitorDB(dbPath, db);
+  }
+
+  save(): void {
+    const data = this.db.export();
+    writeFileSync(this.dbPath, Buffer.from(data));
+  }
+
+  private queryAll(sql: string, params: any[] = []): any[] {
+    const stmt = this.db.prepare(sql);
+    if (params.length > 0) stmt.bind(params);
+    const results = [];
+    while (stmt.step()) {
+      results.push(stmt.getAsObject());
+    }
+    stmt.free();
+    return results;
+  }
+
+  private queryGet(sql: string, params: any[] = []): any {
+    const stmt = this.db.prepare(sql);
+    if (params.length > 0) stmt.bind(params);
+    let result = null;
+    if (stmt.step()) {
+      result = stmt.getAsObject();
+    }
+    stmt.free();
+    return result;
+  }
+
+  private run(sql: string, params: any[] = []): void {
+    this.db.run(sql, params);
   }
 
   private init(): void {
@@ -143,7 +187,7 @@ export class MonitorDB {
   }
 
   private ensureColumn(table: string, column: string, definition: string): void {
-    const columns = this.db.query(`PRAGMA table_info(${table})`).all() as { name: string }[];
+    const columns = this.queryAll(`PRAGMA table_info(${table})`) as { name: string }[];
     if (columns.some((entry) => entry.name === column)) {
       return;
     }
@@ -152,50 +196,50 @@ export class MonitorDB {
   }
 
   upsertWorkspace(ws: Omit<Workspace, "total_pb_bytes" | "total_brain_bytes" | "conversation_count">): void {
-    this.db.run(
-      `INSERT INTO workspaces (id, uri, name, last_seen)
-       VALUES (?1, ?2, ?3, ?4)
-       ON CONFLICT(id) DO UPDATE SET
-         uri = excluded.uri,
-         name = excluded.name,
-         last_seen = excluded.last_seen`,
-      [ws.id, ws.uri, ws.name, ws.last_seen]
-    );
+    const upsertSql = `
+      INSERT INTO workspaces (id, uri, name, last_seen)
+      VALUES (?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        uri = excluded.uri,
+        name = excluded.name,
+        last_seen = excluded.last_seen
+    `;
+    this.run(upsertSql, [ws.id, ws.uri, ws.name, ws.last_seen || null]);
   }
 
   updateWorkspaceAggregates(workspaceId: string): void {
-    this.db.run(
+    this.run(
       `UPDATE workspaces SET
-         total_pb_bytes = COALESCE((SELECT SUM(pb_file_bytes) FROM conversations WHERE workspace_id = ?1), 0),
-         total_brain_bytes = COALESCE((SELECT SUM(brain_folder_bytes) FROM conversations WHERE workspace_id = ?1), 0),
-         conversation_count = (SELECT COUNT(*) FROM conversations WHERE workspace_id = ?1)
-       WHERE id = ?1`,
-      [workspaceId]
+         total_pb_bytes = COALESCE((SELECT SUM(pb_file_bytes) FROM conversations WHERE workspace_id = ?), 0),
+         total_brain_bytes = COALESCE((SELECT SUM(brain_folder_bytes) FROM conversations WHERE workspace_id = ?), 0),
+         conversation_count = (SELECT COUNT(*) FROM conversations WHERE workspace_id = ?)
+       WHERE id = ?`,
+      [workspaceId, workspaceId, workspaceId, workspaceId]
     );
   }
 
   getAllWorkspaces(): Workspace[] {
-    return this.db.query("SELECT * FROM workspaces ORDER BY total_pb_bytes DESC").all() as Workspace[];
+    return this.queryAll("SELECT * FROM workspaces ORDER BY total_pb_bytes DESC") as Workspace[];
   }
 
   getWorkspaceByName(name: string): Workspace | null {
-    return this.db.query("SELECT * FROM workspaces WHERE name = ?1").get(name) as Workspace | null;
+    return this.queryGet("SELECT * FROM workspaces WHERE name = ?", [name]) as Workspace | null;
   }
 
   getWorkspaceById(id: string): Workspace | null {
-    return this.db.query("SELECT * FROM workspaces WHERE id = ?1").get(id) as Workspace | null;
+    return this.queryGet("SELECT * FROM workspaces WHERE id = ?", [id]) as Workspace | null;
   }
 
   upsertConversation(conv: Conversation): void {
-    this.db.run(
-      `INSERT INTO conversations (
+    const upsertSql = `
+       INSERT INTO conversations (
          id, workspace_id, title, pb_file_bytes, brain_folder_bytes,
          brain_artifact_count, resolved_version_count, message_count,
          message_count_source, estimated_prompt_tokens, estimated_artifact_tokens,
          estimated_tokens, annotation_timestamp, created_at, last_modified,
          last_active_at, activity_source, mapping_source, mapping_confidence, mapping_notes, is_active
        )
-       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(id) DO UPDATE SET
          workspace_id = excluded.workspace_id,
          title = excluded.title,
@@ -215,66 +259,67 @@ export class MonitorDB {
          mapping_source = excluded.mapping_source,
          mapping_confidence = excluded.mapping_confidence,
          mapping_notes = excluded.mapping_notes,
-         is_active = excluded.is_active`,
-      [
-        conv.id,
-        conv.workspace_id,
-        conv.title,
-        conv.pb_file_bytes,
-        conv.brain_folder_bytes,
-        conv.brain_artifact_count,
-        conv.resolved_version_count,
-        conv.message_count,
-        conv.message_count_source,
-        conv.estimated_prompt_tokens,
-        conv.estimated_artifact_tokens,
-        conv.estimated_tokens,
-        conv.annotation_timestamp,
-        conv.created_at,
-        conv.last_modified,
-        conv.last_active_at,
-        conv.activity_source,
-        conv.mapping_source,
-        conv.mapping_confidence,
-        conv.mapping_notes,
-        conv.is_active,
-      ]
-    );
+         is_active = excluded.is_active
+    `;
+    this.run(upsertSql, [
+      conv.id,
+      conv.workspace_id || null,
+      conv.title || null,
+      conv.pb_file_bytes,
+      conv.brain_folder_bytes,
+      conv.brain_artifact_count,
+      conv.resolved_version_count,
+      conv.message_count ?? null,
+      conv.message_count_source || null,
+      conv.estimated_prompt_tokens,
+      conv.estimated_artifact_tokens,
+      conv.estimated_tokens,
+      conv.annotation_timestamp ?? null,
+      conv.created_at || null,
+      conv.last_modified || null,
+      conv.last_active_at || null,
+      conv.activity_source || null,
+      conv.mapping_source || null,
+      conv.mapping_confidence ?? null,
+      conv.mapping_notes || null,
+      conv.is_active,
+    ]);
   }
 
   getConversationsByWorkspace(workspaceId: string | null): Conversation[] {
     if (workspaceId === null) {
-      return this.db.query(
+      return this.queryAll(
         "SELECT * FROM conversations WHERE workspace_id IS NULL ORDER BY estimated_tokens DESC, pb_file_bytes DESC"
-      ).all() as Conversation[];
+      ) as Conversation[];
     }
 
-    return this.db.query(
-      "SELECT * FROM conversations WHERE workspace_id = ?1 ORDER BY estimated_tokens DESC, pb_file_bytes DESC"
-    ).all(workspaceId) as Conversation[];
+    return this.queryAll(
+      "SELECT * FROM conversations WHERE workspace_id = ? ORDER BY estimated_tokens DESC, pb_file_bytes DESC",
+      [workspaceId]
+    ) as Conversation[];
   }
 
   getConversation(id: string): Conversation | null {
-    return this.db.query("SELECT * FROM conversations WHERE id = ?1").get(id) as Conversation | null;
+    return this.queryGet("SELECT * FROM conversations WHERE id = ?", [id]) as Conversation | null;
   }
 
   getAllConversations(): Conversation[] {
-    return this.db.query(
+    return this.queryAll(
       "SELECT * FROM conversations ORDER BY estimated_tokens DESC, pb_file_bytes DESC"
-    ).all() as Conversation[];
+    ) as Conversation[];
   }
 
   getCurrentConversation(): Conversation | null {
-    return this.db.query(
+    return this.queryGet(
       `SELECT * FROM conversations
        ORDER BY is_active DESC, COALESCE(last_active_at, last_modified) DESC, estimated_tokens DESC
        LIMIT 1`
-    ).get() as Conversation | null;
+    ) as Conversation | null;
   }
 
   deleteConversation(id: string): void {
-    this.db.run("DELETE FROM snapshots WHERE conversation_id = ?1", [id]);
-    this.db.run("DELETE FROM conversations WHERE id = ?1", [id]);
+    this.run("DELETE FROM snapshots WHERE conversation_id = ?", [id]);
+    this.run("DELETE FROM conversations WHERE id = ?", [id]);
   }
 
   deleteConversationsByWorkspace(workspaceId: string): string[] {
@@ -287,7 +332,7 @@ export class MonitorDB {
   }
 
   deleteConversationsNotIn(ids: string[]): string[] {
-    const current = this.db.query("SELECT id FROM conversations").all() as { id: string }[];
+    const current = this.queryAll("SELECT id FROM conversations") as { id: string }[];
     const allowed = new Set(ids);
     const removed: string[] = [];
 
@@ -302,34 +347,36 @@ export class MonitorDB {
   }
 
   clearActiveConversation(): void {
-    this.db.run("UPDATE conversations SET is_active = 0");
+    this.run("UPDATE conversations SET is_active = 0");
   }
 
   insertSnapshot(snap: Omit<Snapshot, "id">): void {
-    this.db.run(
+    this.run(
       `INSERT INTO snapshots (conversation_id, timestamp, pb_file_bytes, estimated_tokens, message_count, delta_bytes)
-       VALUES (?1, ?2, ?3, ?4, ?5, ?6)`,
+       VALUES (?, ?, ?, ?, ?, ?)`,
       [
         snap.conversation_id,
         snap.timestamp,
-        snap.pb_file_bytes,
-        snap.estimated_tokens,
-        snap.message_count,
-        snap.delta_bytes,
+        snap.pb_file_bytes ?? null,
+        snap.estimated_tokens ?? null,
+        snap.message_count ?? null,
+        snap.delta_bytes ?? null,
       ]
     );
   }
 
   getLatestSnapshot(conversationId: string): Snapshot | null {
-    return this.db.query(
-      "SELECT * FROM snapshots WHERE conversation_id = ?1 ORDER BY timestamp DESC LIMIT 1"
-    ).get(conversationId) as Snapshot | null;
+    return this.queryGet(
+      "SELECT * FROM snapshots WHERE conversation_id = ? ORDER BY timestamp DESC LIMIT 1",
+      [conversationId]
+    ) as Snapshot | null;
   }
 
   getSnapshotHistory(conversationId: string, limit = 50): Snapshot[] {
-    return this.db.query(
-      "SELECT * FROM snapshots WHERE conversation_id = ?1 ORDER BY timestamp DESC LIMIT ?2"
-    ).all(conversationId, limit) as Snapshot[];
+    return this.queryAll(
+      "SELECT * FROM snapshots WHERE conversation_id = ? ORDER BY timestamp DESC LIMIT ?",
+      [conversationId, limit]
+    ) as Snapshot[];
   }
 
   getTotalStats(): {
@@ -338,14 +385,14 @@ export class MonitorDB {
     total_conversations: number;
     total_estimated_tokens: number;
   } {
-    return this.db.query(`
+    return this.queryGet(`
       SELECT
         COALESCE(SUM(pb_file_bytes), 0) as total_pb_bytes,
         COALESCE(SUM(brain_folder_bytes), 0) as total_brain_bytes,
         COUNT(*) as total_conversations,
         COALESCE(SUM(estimated_tokens), 0) as total_estimated_tokens
       FROM conversations
-    `).get() as {
+    `) as {
       total_pb_bytes: number;
       total_brain_bytes: number;
       total_conversations: number;
@@ -354,7 +401,7 @@ export class MonitorDB {
   }
 
   close(): void {
-    this.db.close();
+    // sql.js doesn't need to be explicitly closed in the same way, but we can just free memory if desired.
   }
 
   raw(): Database {

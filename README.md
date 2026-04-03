@@ -11,8 +11,6 @@
 
 Modern AI interactions often involve sending massive context sets back to the model, which can rapidly increase token expenditures and slow down responsiveness. This extension provides real-time visibility into your session's telemetry directly from your editor's sidebar or terminal.
 
-> **Note**: This is a telemetry and analytics tool, *not* a strict quota-enforcement or limit monitor. It enables understanding of token pacing to optimize runs rather than locking you out of your workflow.
-
 It helps you answer practical questions:
 
 - **How many tokens has this session accumulated in total?**
@@ -27,6 +25,7 @@ The primary experience is the **VS Code sidebar extension**. A fully-featured **
 - Granular turn-level token additions and message metrics
 - Cumulative session total tokens and history scale
 - Live session growth while Antigravity is running
+- Local quota visibility when Antigravity exposes credits in local state
 - Workspace-level conversation token summaries
 - Brain and cache cleanup targets
 
@@ -88,12 +87,14 @@ Create `.ag-kernel.json` in your project root or home directory:
 
 ```json
 {
-  "bloatLimit": 3000000,
+  "bloatLimit": 1000000,
   "bytesPerToken": 3.5,
   "dbPath": "~/.ag-kernel/monitor.db",
   "logLevel": "info"
 }
 ```
+
+`bloatLimit` is a warning threshold for estimated historical session footprint. It is not an exact model context cap or billed-token ceiling.
 
 You can also pass a config explicitly in the CLI:
 
@@ -108,6 +109,8 @@ bun run dev scan --config .ag-kernel.json
 Antigravity Token Monitor uses estimated values unless Antigravity runtime logs expose a direct signal.
 
 It does not proxy, relay, or gateway your Antigravity account traffic. It reads local Antigravity files and runtime metadata on your machine.
+
+These estimates track historical session footprint and live growth. They are not the same thing as exact billed model usage. Exact token accounting requires model-side tokenizer or usage metadata such as a `countTokens` or usage API.
 
 - History estimate:
   - prefers direct message count when available
