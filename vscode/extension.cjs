@@ -59,7 +59,7 @@ class AgKernelSidebarProvider {
     this.view = webviewView;
     webviewView.webview.options = { enableScripts: true };
 
-    webviewView.webview.onDidReceiveMessage((message) => {
+    webviewView.webview.onDidReceiveMessage(async (message) => {
       if (message?.type === "refresh") {
         void this.refresh(true);
         return;
@@ -75,10 +75,27 @@ class AgKernelSidebarProvider {
       if (message?.type === "toggleSection" && message.sectionId) {
         this.sectionState[message.sectionId] = Boolean(message.open);
       }
-      if (message?.type === "clean") {
-        vscode.window.showInformationMessage(
-          "Cleanup functionality is scheduled for Phase 2 Implementation.",
+      if (message?.type === "reindex") {
+        this.runtime.clearCache?.();
+        void this.refresh(true);
+        return;
+      }
+      if (message?.type === "clean" && message.orphanId) {
+        const orphanId = message.orphanId;
+        const answer = await vscode.window.showWarningMessage(
+          `Delete orphan brain folder "${orphanId}"? This is irreversible.`,
+          { modal: true },
+          "Delete",
         );
+        if (answer === "Delete") {
+          try {
+            await this.runtime.cleanOrphanBrainFolder?.(orphanId);
+            vscode.window.showInformationMessage(`Deleted orphan folder: ${orphanId}`);
+            void this.refresh(true);
+          } catch (err) {
+            vscode.window.showErrorMessage(`Failed to delete: ${err?.message || err}`);
+          }
+        }
         return;
       }
     });
@@ -281,7 +298,11 @@ function getHtml(webview, model) {
           e.stopPropagation();
           const action = button.getAttribute("data-action");
           if (action === "refresh") vscode.postMessage({ type: "refresh" });
-          if (action === "clean") vscode.postMessage({ type: "clean" });
+          if (action === "reindex") vscode.postMessage({ type: "reindex" });
+          if (action === "clean") {
+            const orphanId = button.getAttribute("data-orphan-id");
+            vscode.postMessage({ type: "clean", orphanId: orphanId });
+          }
         });
       }
       for (const section of document.querySelectorAll("details[data-section-id]")) {
@@ -301,12 +322,13 @@ function renderOverview(snapshot, current) {
   if (!snapshot) return "";
   const overview = snapshot.overview;
   const tone = toneClass(current?.healthTone || "neutral");
-  const quotaValue = formatQuota(overview.modelCredits);
+  const modelInfo = formatModelInfo(overview.modelCredits, overview.modelPreferences);
+  const creditsStatus = formatCreditsStatus(overview.modelCredits);
   return `
     ${renderTreeItem(SVGS.pulse, "State", formatResolutionLabel(overview.resolutionState), "", tone)}
-    ${renderTreeItem(SVGS.info, "Quota Used", quotaValue)}
+    ${renderTreeItem(SVGS.info, "Active Model", modelInfo)}
+    ${renderTreeItem(SVGS.info, "Credits", creditsStatus)}
     ${renderTreeItem(SVGS.graph, "Warning Limit", formatTokens(overview.warningLimit || 0))}
-    ${renderTreeItem(SVGS.graph, "Session Total Tokens", current ? `${current.estimatedTotalTokensFormatted}` : "0")}
     ${renderTreeItem(SVGS.link, "Mapped sessions", `${overview.mappedConversations}/${overview.totalConversations}`)}
     ${renderTreeItem(SVGS.info, "Unmapped sessions", String(overview.unmappedConversations))}
   `;
@@ -315,18 +337,18 @@ function renderOverview(snapshot, current) {
 function renderCurrentConversation(snapshot, current) {
   if (!snapshot || !current)
     return '<div class="empty">No current conversation could be resolved.</div>';
-  const label = current.title || "Untitled";
+  const label = current.title || formatSessionLabel(current.conversationId);
   return `
     ${renderTreeItem(SVGS.folder, label, "", current.healthTone === "neutral" ? "" : current.health, current.healthTone)}
     ${renderTreeItem("", "Tokens Added This Turn", current.deltaEstimatedTokensFormatted || "+0")}
     ${renderTreeItem("", "Last Observed Turn", current.lastObservedTurnTokensFormatted || "none")}
     ${renderTreeItem("", "Tokens Added In Last 5 Turns", current.lastFiveTurnsTokensFormatted || "+0")}
-    ${renderTreeItem("", "Last Active", current.lastActiveRelative || "unknown")}
-    ${renderTreeItem("", "Session Direct Messages", current.messageCount !== null ? `${current.messageCount}${current.messageCountSource ? ` (${current.messageCountSource})` : ""}` : "unknown")}
-    ${renderTreeItem("", "Direct Messages This Turn", current.currentTurnDirectMessages !== null ? String(current.currentTurnDirectMessages) : "unknown")}
+    ${renderTreeItem("", "Last Active", current.lastActiveRelative || "listening\u2026")}
+    ${renderTreeItem("", "Session Direct Messages", current.messageCount !== null ? `${current.messageCount}${current.messageCountSource ? ` (${current.messageCountSource})` : ""}` : "not yet observed")}
+    ${renderTreeItem("", "Direct Messages This Turn", current.currentTurnDirectMessages !== null ? String(current.currentTurnDirectMessages) : "needs more turns")}
     ${renderTreeItem("", "Observed Turns", String(current.observedTurnCount || 0))}
-    ${renderTreeItem("", "Avg Tokens / Observed Turn", current.avgTokensPerObservedTurnFormatted || "unknown")}
-    ${renderTreeItem("", "Avg Direct Msgs / Observed Turn", current.avgDirectMessagesPerObservedTurnFormatted || "unknown")}
+    ${renderTreeItem("", "Avg Tokens / Observed Turn", current.avgTokensPerObservedTurnFormatted || "needs more turns")}
+    ${renderTreeItem("", "Avg Direct Msgs / Observed Turn", current.avgDirectMessagesPerObservedTurnFormatted || "needs more turns")}
     ${renderRecentChatRuns(current) || ""}
   `;
 }
@@ -392,16 +414,18 @@ function renderWorkspace(snapshot) {
 function renderCleanup(snapshot) {
   if (!snapshot) return `<div class="empty">No cleanup data available.</div>`;
   const cleanup = snapshot.cleanupSummary;
-  let html = "";
+  let html = `<div style="padding:4px 18px;">
+    <button class="action-btn" title="Reindex all sessions" data-action="reindex" style="display:inline-flex;gap:4px;opacity:1;font-size:11px;">${SVGS.refresh} Reindex All Sessions</button>
+  </div>`;
   if (
     cleanup.unmappedConversations &&
     cleanup.unmappedConversations.length > 0
   ) {
-    html += `<div class="tree-subitems-header empty" style="margin-top:4px;">Unmapped Sessions:</div>`;
+    html += `<div class="tree-subitems-header empty" style="margin-top:4px;">Unmapped Sessions (try Reindex first):</div>`;
     cleanup.unmappedConversations.slice(0, 4).forEach((c) => {
       html += renderTreeItem(
         SVGS.info,
-        c.title || "Untitled",
+        c.title || formatSessionLabel(c.conversationId),
         c.estimatedTotalTokensFormatted,
         "",
         "",
@@ -423,12 +447,14 @@ function renderCleanup(snapshot) {
         "",
         null,
         `
-        <button class="action-btn" title="Clean" data-action="clean">${SVGS.clean}</button>
+        <button class="action-btn" title="Delete this orphan folder" data-action="clean" data-orphan-id="${escapeHtml(folder)}">${SVGS.trash}</button>
       `,
       );
     });
   }
-  if (!html) html = `<div class="empty">Workspace is clean.</div>`;
+  if (cleanup.unmappedConversations?.length === 0 && cleanup.orphanBrainFolders?.length === 0) {
+    html += `<div class="empty">Workspace is clean. No orphan folders found.</div>`;
+  }
   return html;
 }
 
@@ -488,25 +514,32 @@ function formatTokens(tokens) {
   return String(value);
 }
 
-function formatQuota(modelCredits) {
-  if (!modelCredits) return "unavailable in local state";
-  const used =
-    typeof modelCredits.used === "number" && Number.isFinite(modelCredits.used)
-      ? modelCredits.used
-      : 0;
-  const total =
-    typeof modelCredits.total === "number" &&
-    Number.isFinite(modelCredits.total)
-      ? modelCredits.total
-      : 0;
-  if (total > 0) {
-    const ratio = Math.max(0, Math.min(1, used / total));
-    return `${used}/${total} (${Math.round(ratio * 100)}%)`;
+function formatModelInfo(modelCredits, modelPreferences) {
+  if (modelPreferences && modelPreferences.modelName) {
+    return modelPreferences.modelName;
   }
-  if (used > 0) {
-    return `${used} used`;
+  if (modelPreferences && modelPreferences.modelId) {
+    return `Model #${modelPreferences.modelId}`;
   }
-  return "unavailable in local state";
+  return "not detected";
+}
+
+function formatCreditsStatus(modelCredits) {
+  if (!modelCredits) return "open Settings \u2192 Models for details";
+  
+  if (modelCredits.total > 0) {
+    const percentage = Math.round((modelCredits.used / modelCredits.total) * 100);
+    return `${percentage}% used (${modelCredits.used}/${modelCredits.total})`;
+  }
+
+  if (modelCredits.status === "available") return "\u2713 available";
+  if (modelCredits.status === "restricted") return "\u26a0 restricted";
+  return "open Settings \u2192 Models for details";
+}
+
+function formatSessionLabel(id) {
+  if (!id) return "Untitled";
+  return `Session ${id.substring(0, 8)}\u2026`;
 }
 
 function getStyles() {

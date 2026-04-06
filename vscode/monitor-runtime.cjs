@@ -1079,6 +1079,126 @@ function decodeObjectLikeValue(raw) {
   return printable || null;
 }
 
+const KNOWN_MODEL_IDS = new Map([
+  [1037, "Claude Opus 4.6 (Thinking)"],
+  [1001, "Gemini 2.5 Pro"],
+  [1002, "Gemini 2.5 Flash"],
+  [1003, "Gemini 2.0 Flash"],
+  [1004, "Gemini 1.5 Pro"],
+  [1010, "Claude 3.5 Sonnet"],
+  [1011, "Claude 3.5 Haiku"],
+  [1020, "GPT-4o"],
+  [1030, "Claude Opus 4"],
+  [1035, "Claude Sonnet 4"],
+]);
+
+function readProtobufVarint(buffer, offset) {
+  let value = 0;
+  let shift = 0;
+  let b;
+  do {
+    if (offset >= buffer.length) return { value, nextOffset: offset };
+    b = buffer[offset++];
+    value |= (b & 0x7f) << shift;
+    shift += 7;
+  } while (b & 0x80);
+  return { value, nextOffset: offset };
+}
+
+function parseProtobufFields(buffer) {
+  const fields = [];
+  let offset = 0;
+  while (offset < buffer.length) {
+    const tag = readProtobufVarint(buffer, offset);
+    offset = tag.nextOffset;
+    const fieldNumber = tag.value >> 3;
+    const wireType = tag.value & 0x07;
+    if (wireType === 0) {
+      const val = readProtobufVarint(buffer, offset);
+      offset = val.nextOffset;
+      fields.push({ fieldNumber, wireType, value: val.value });
+    } else if (wireType === 2) {
+      const len = readProtobufVarint(buffer, offset);
+      offset = len.nextOffset;
+      const data = buffer.subarray(offset, offset + len.value);
+      offset += len.value;
+      fields.push({ fieldNumber, wireType, data });
+    } else {
+      break;
+    }
+  }
+  return fields;
+}
+
+function decodeProtobufSentinels(rawString) {
+  try {
+    const buffer = Buffer.from(rawString, "base64");
+    const topFields = parseProtobufFields(buffer);
+    const sentinels = {};
+    for (const field of topFields) {
+      if (field.wireType !== 2 || !field.data) continue;
+      const inner = parseProtobufFields(field.data);
+      let key = null;
+      let sentinelValue = null;
+      for (const sub of inner) {
+        if (sub.fieldNumber === 1 && sub.wireType === 2 && sub.data) {
+          key = sub.data.toString("utf-8");
+        }
+        if (sub.fieldNumber === 2 && sub.wireType === 2 && sub.data) {
+          const str = sub.data.toString("utf-8");
+          try {
+            const innerBuf = Buffer.from(str, "base64");
+            const innerFields = parseProtobufFields(innerBuf);
+            sentinelValue = innerFields.length > 0 ? innerFields[0].value : str;
+          } catch {
+            sentinelValue = str;
+          }
+        }
+      }
+      if (key) sentinels[key] = sentinelValue;
+    }
+    return sentinels;
+  } catch {
+    return null;
+  }
+}
+
+function decodeModelPreference(rawString) {
+  try {
+    const sentinels = decodeProtobufSentinels(rawString);
+    if (!sentinels) return null;
+    const modelKey = sentinels["last_selected_agent_model_sentinel_key"];
+    if (modelKey === undefined || modelKey === null) return null;
+    const modelId = typeof modelKey === "number" ? modelKey : parseInt(modelKey, 10);
+    if (!Number.isFinite(modelId)) return null;
+    const modelName = KNOWN_MODEL_IDS.get(modelId) || `Model #${modelId}`;
+    return { modelId, modelName };
+  } catch {
+    return null;
+  }
+}
+
+function decodeCreditsInfo(rawString) {
+  try {
+    const sentinels = decodeProtobufSentinels(rawString);
+    if (!sentinels) return null;
+    const available = sentinels["availableCreditsSentinelKey"];
+    const minimum = sentinels["minimumCreditAmountForUsageKey"];
+    const useCredits = sentinels["useAICreditsSentinelKey"];
+    return {
+      creditsAvailable: available !== undefined ? available : null,
+      minimumForUsage: minimum !== undefined ? minimum : null,
+      creditsEnabled: useCredits === 1 || useCredits === true,
+      status: useCredits === 1 || useCredits === true
+        ? (available !== undefined && available > 0 ? "available" : "restricted")
+        : "unknown",
+      raw: sentinels,
+    };
+  } catch {
+    return null;
+  }
+}
+
 function fileStamp(filePath) {
   try {
     const stats = fs.statSync(filePath);
@@ -2057,31 +2177,16 @@ class AgKernelMonitorRuntime {
         db,
         "antigravityUnifiedStateSync.modelCredits",
       );
-      const creditsValue = creditsRaw
-        ? decodeObjectLikeValue(creditsRaw)
+      const modelCredits = creditsRaw
+        ? decodeCreditsInfo(creditsRaw)
         : null;
-      let modelCredits = null;
-      if (creditsValue && typeof creditsValue === "object") {
-        modelCredits = {
-          used: typeof creditsValue.used === "number" ? creditsValue.used : 0,
-          total:
-            typeof creditsValue.total === "number" ? creditsValue.total : 0,
-          resetDate:
-            typeof creditsValue.resetDate === "string"
-              ? creditsValue.resetDate
-              : undefined,
-          raw: creditsValue,
-        };
-      } else if (creditsValue) {
-        modelCredits = { used: 0, total: 0, raw: creditsValue };
-      }
 
       const modelPreferencesRaw = readItemTableRawValue(
         db,
         "antigravityUnifiedStateSync.modelPreferences",
       );
       const modelPreferences = modelPreferencesRaw
-        ? decodeObjectLikeValue(modelPreferencesRaw)
+        ? decodeModelPreference(modelPreferencesRaw)
         : null;
 
       const result = {
@@ -2460,6 +2565,7 @@ class AgKernelMonitorRuntime {
         unmappedConversations: mappedStats.conversationsUnmapped,
         orphanBrainFolders: mappedStats.orphanBrainFolders,
         modelCredits: stateResult.modelCredits,
+        modelPreferences: stateResult.modelPreferences,
         warningLimit: monitorConfig.bloatLimit,
         currentWorkspaceName: currentConversation.conversation
           ? currentConversation.conversation.workspaceName
@@ -2511,6 +2617,44 @@ class AgKernelMonitorRuntime {
       liveFeed: this.liveState.feed.slice(0, LIVE_FEED_LIMIT),
       allConversations,
     });
+  }
+
+  cleanOrphanBrainFolder(orphanId) {
+    const brainDir = getBrainDir();
+    const folderPath = path.join(brainDir, orphanId);
+    if (!fs.existsSync(folderPath)) {
+      return { cleaned: false, reason: "folder not found" };
+    }
+    try {
+      const stats = fs.statSync(folderPath);
+      if (!stats.isDirectory()) {
+        return { cleaned: false, reason: "not a directory" };
+      }
+      let bytesFreed = 0;
+      const countBytes = (dir) => {
+        for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+          const p = path.join(dir, entry.name);
+          if (entry.isDirectory()) {
+            countBytes(p);
+          } else {
+            try { bytesFreed += fs.statSync(p).size; } catch {}
+          }
+        }
+      };
+      countBytes(folderPath);
+      fs.rmSync(folderPath, { recursive: true, force: true });
+      return { cleaned: true, bytesFreed };
+    } catch (error) {
+      return { cleaned: false, reason: String(error.message || error) };
+    }
+  }
+
+  clearCache() {
+    this.cache = {
+      stateVscdb: { stamp: null, value: null },
+      storageJson: { stamp: null, value: null },
+      logFile: { stamp: null, value: null },
+    };
   }
 }
 

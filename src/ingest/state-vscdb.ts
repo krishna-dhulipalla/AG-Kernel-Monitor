@@ -37,6 +37,7 @@ export interface ModelCredits {
   used: number;
   total: number;
   resetDate?: string;
+  status?: string;
   raw: unknown;
 }
 
@@ -435,6 +436,7 @@ export async function parseStateVscdb(customPath?: string): Promise<StateVscdbRe
         used: typeof record.used === "number" ? record.used : 0,
         total: typeof record.total === "number" ? record.total : 0,
         resetDate: typeof record.resetDate === "string" ? record.resetDate : undefined,
+        status: typeof record.status === "string" ? record.status : undefined,
         raw: creditsValue,
       };
     } else if (creditsValue) {
