@@ -326,7 +326,6 @@ function renderOverview(snapshot, current) {
   const creditsStatus = formatCreditsStatus(overview.modelCredits);
   return `
     ${renderTreeItem(SVGS.pulse, "State", formatResolutionLabel(overview.resolutionState), "", tone)}
-    ${renderTreeItem(SVGS.info, "Active Model", modelInfo)}
     ${renderTreeItem(SVGS.info, "Credits", creditsStatus)}
     ${renderTreeItem(SVGS.graph, "Warning Limit", formatTokens(overview.warningLimit || 0))}
     ${renderTreeItem(SVGS.link, "Mapped sessions", `${overview.mappedConversations}/${overview.totalConversations}`)}
@@ -340,6 +339,7 @@ function renderCurrentConversation(snapshot, current) {
   const label = current.title || formatSessionLabel(current.conversationId);
   return `
     ${renderTreeItem(SVGS.folder, label, "", current.healthTone === "neutral" ? "" : current.health, current.healthTone)}
+    ${renderTreeItem(SVGS.graph, "Session Total Tokens", current.estimatedTotalTokensFormatted || "0")}
     ${renderTreeItem("", "Tokens Added This Turn", current.deltaEstimatedTokensFormatted || "+0")}
     ${renderTreeItem("", "Last Observed Turn", current.lastObservedTurnTokensFormatted || "none")}
     ${renderTreeItem("", "Tokens Added In Last 5 Turns", current.lastFiveTurnsTokensFormatted || "+0")}

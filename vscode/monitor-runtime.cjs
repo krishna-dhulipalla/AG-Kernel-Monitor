@@ -6,7 +6,7 @@ const initSqlJs = require("sql.js/dist/sql-wasm.js");
 
 const ACTIVE_WINDOW_MS = 90_000;
 const LIVE_FEED_LIMIT = 5;
-const QUIET_TURN_FINALIZE_MS = 30000;
+const QUIET_TURN_FINALIZE_MS = 120000;
 const UNMAPPED_WORKSPACE_ID = "__unmapped__";
 const UNMAPPED_WORKSPACE_URI = "__unmapped__";
 const UUID_REGEX =
@@ -1676,13 +1676,29 @@ class AgKernelMonitorRuntime {
       for (const update of logChanges.messageUpdates) {
         const conversation = nextIndex.get(update.conversationId);
         if (!conversation) continue;
-        recordChatBoundary(
+        const state = ensureChatRunState(
           this.liveState,
           update.conversationId,
-          update.messageCount,
           conversation.estimatedTotalTokens,
-          update.timestamp || new Date().toISOString(),
         );
+        if (
+          state.lastMessageCount !== null &&
+          update.messageCount < state.lastMessageCount
+        ) {
+          recordChatBoundary(
+            this.liveState,
+            update.conversationId,
+            update.messageCount,
+            conversation.estimatedTotalTokens,
+            update.timestamp || new Date().toISOString(),
+          );
+        } else {
+          state.lastMessageCount = update.messageCount;
+          if (state.currentRunStartMessageCount === null) {
+            state.currentRunStartMessageCount = update.messageCount;
+          }
+          state.lastProgressAt = update.timestamp || new Date().toISOString();
+        }
       }
 
       for (const change of pbChanges) {

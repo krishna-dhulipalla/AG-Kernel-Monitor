@@ -2,7 +2,7 @@
   "name": "ag-kernel-monitor",
   "displayName": "Antigravity Token Monitor",
   "publisher": "Krishnadhulipalla",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "Token consumption, turn growth, context bloat, and cache monitoring for Antigravity sessions",
   "icon": "media/icon.png",
   "type": "module",
